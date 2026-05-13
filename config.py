@@ -54,4 +54,4 @@ FINAL_KEY_BITS = 256          # AES-256 key length
 # ─────────────────────────────────────────────
 # File Transfer
 # ─────────────────────────────────────────────
-CHUNK_SIZE = 4096             # Socket send/recv chunk size for file data
+CHUNK_SIZE = 65536            # 64 KB — chunk size for streaming file encryption/transfer

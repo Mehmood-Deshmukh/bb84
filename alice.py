@@ -18,6 +18,7 @@ Usage:
 """
 
 import sys
+import os
 import json
 import struct
 import socket
@@ -30,6 +31,7 @@ from config import (
     BUFFER_SIZE,
     NUM_QUBITS,
     QBER_THRESHOLD,
+    CHUNK_SIZE,
 )
 from quantum_channel import prepare_qubits, apply_channel_noise
 from bb84_protocol import (
@@ -42,7 +44,7 @@ from bb84_protocol import (
     reconcile_keys,
     privacy_amplification,
 )
-from crypto_utils import derive_aes_key, encrypt_file
+from crypto_utils import derive_aes_key, encrypt_chunk, derive_chunk_nonce
 
 
 # ─────────────────────────────────────────────
@@ -65,7 +67,7 @@ def banner():
     print(f"""
 {Colors.CYAN}{Colors.BOLD}
 ╔══════════════════════════════════════════════════════════╗
-║          🔐  BB84 QKD Secure File Transfer  🔐          ║
+║          🔐  BB84 QKD Secure File Transfer  🔐           ║
 ║                    ━━━ ALICE (Sender) ━━━                ║
 ╚══════════════════════════════════════════════════════════╝
 {Colors.END}""")
@@ -263,29 +265,43 @@ def main():
     # Send salt to Bob so he can derive the same key
     send_json(sock, {"salt": salt.hex()})
 
-    # ── Step 10: File Encryption & Transfer ──
-    section("Phase 5: Secure File Transfer")
+    # ── Step 10: Chunked File Encryption & Streaming Transfer ──
+    section("Phase 5: Secure File Transfer (Chunked Streaming)")
 
     aes_key = derive_aes_key(final_key)
-    status(f"Encrypting file: {filepath}")
 
-    nonce, tag, ciphertext, filename = encrypt_file(filepath, aes_key)
-    success(f"File encrypted with AES-256-GCM")
-    status(f"  Ciphertext: {len(ciphertext)} bytes")
-    status(f"  Nonce: {nonce.hex()}")
-    status(f"  Auth tag: {tag.hex()}")
+    file_size = os.path.getsize(filepath)
+    filename = os.path.basename(filepath)
+    num_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE if file_size > 0 else 0
+    base_nonce = os.urandom(8)  # 8 bytes; extended with 4-byte counter per chunk
 
-    # Send file metadata + encrypted data
+    status(f"File: {filename} ({file_size} bytes)")
+    status(f"Streaming as {num_chunks} chunk(s) of {CHUNK_SIZE // 1024} KB")
+
+    # Send file metadata
     file_meta = {
         "filename": filename,
-        "nonce": nonce.hex(),
-        "tag": tag.hex(),
-        "size": len(ciphertext),
+        "total_size": file_size,
+        "chunk_size": CHUNK_SIZE,
+        "num_chunks": num_chunks,
+        "base_nonce": base_nonce.hex(),
     }
     send_json(sock, file_meta)
-    send_bytes(sock, ciphertext)
 
-    success(f"Encrypted file '{filename}' sent to Bob!")
+    # Stream: read chunk → encrypt → send
+    with open(filepath, "rb") as f:
+        for i in range(num_chunks):
+            plaintext_chunk = f.read(CHUNK_SIZE)
+            nonce = derive_chunk_nonce(base_nonce, i)
+            ciphertext, tag = encrypt_chunk(plaintext_chunk, aes_key, nonce)
+            # Send tag (16 B) + ciphertext as one length-prefixed message
+            send_bytes(sock, tag + ciphertext)
+
+            if (i + 1) % 100 == 0 or i == num_chunks - 1:
+                pct = (i + 1) / num_chunks * 100
+                status(f"  Sent chunk {i+1}/{num_chunks} ({pct:.1f}%)")
+
+    success(f"Encrypted file '{filename}' streamed to Bob ({num_chunks} chunks)")
 
     # ── Done ──
     section("Transfer Complete")
@@ -295,6 +311,7 @@ def main():
     status(f"Final key length: {len(final_key) * 8} bits")
     status(f"QBER: {qber*100:.2f}%")
     status(f"Errors corrected: {errors_fixed}")
+    status(f"File chunks: {num_chunks} × {CHUNK_SIZE // 1024} KB")
 
     sock.close()
 

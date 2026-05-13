@@ -11,6 +11,7 @@ AES-GCM (Galois/Counter Mode) provides:
 """
 
 import os
+import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
@@ -112,3 +113,71 @@ def decrypt_file(
 
     plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
     return plaintext
+
+
+# ─────────────────────────────────────────────
+# Chunked Streaming Encryption / Decryption
+# ─────────────────────────────────────────────
+
+def derive_chunk_nonce(base_nonce: bytes, chunk_index: int) -> bytes:
+    """
+    Derive a unique 12-byte nonce for a specific chunk.
+
+    Construction: base_nonce (8 bytes) || chunk_index (4 bytes big-endian)
+
+    This supports up to 2^32 chunks per file transfer. At 64 KB per chunk,
+    that allows files up to 256 TB.
+
+    Args:
+        base_nonce: 8-byte random value generated per file transfer
+        chunk_index: 0-based chunk number
+
+    Returns:
+        12-byte nonce suitable for AES-GCM
+    """
+    return base_nonce + struct.pack(">I", chunk_index)
+
+
+def encrypt_chunk(plaintext: bytes, key: bytes, nonce: bytes) -> tuple[bytes, bytes]:
+    """
+    Encrypt a single data chunk using AES-256-GCM.
+
+    Each chunk is independently authenticated, so corruption or tampering
+    of any individual chunk is detected immediately upon decryption.
+
+    Args:
+        plaintext: Raw data chunk
+        key: 256-bit AES key
+        nonce: 12-byte unique nonce for this chunk
+
+    Returns:
+        (ciphertext, tag) where tag is the 16-byte GCM authentication tag
+    """
+    aesgcm = AESGCM(key)
+    ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext, None)
+    ciphertext = ciphertext_with_tag[:-16]
+    tag = ciphertext_with_tag[-16:]
+    return ciphertext, tag
+
+
+def decrypt_chunk(ciphertext: bytes, key: bytes, nonce: bytes, tag: bytes) -> bytes:
+    """
+    Decrypt a single data chunk using AES-256-GCM.
+
+    Verifies the authentication tag before returning plaintext.
+
+    Args:
+        ciphertext: Encrypted chunk data
+        key: 256-bit AES key
+        nonce: 12-byte nonce used during encryption
+        tag: 16-byte GCM authentication tag
+
+    Returns:
+        Decrypted plaintext bytes
+
+    Raises:
+        cryptography.exceptions.InvalidTag: If authentication fails
+    """
+    aesgcm = AESGCM(key)
+    ciphertext_with_tag = ciphertext + tag
+    return aesgcm.decrypt(nonce, ciphertext_with_tag, None)

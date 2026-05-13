@@ -34,7 +34,7 @@ from bb84_protocol import (
     reconcile_keys,
     privacy_amplification,
 )
-from crypto_utils import derive_aes_key, decrypt_file
+from crypto_utils import derive_aes_key, decrypt_chunk, derive_chunk_nonce
 
 
 # ─────────────────────────────────────────────
@@ -238,34 +238,44 @@ def main():
     success(f"Final key: {len(final_key) * 8}-bit AES key derived")
     status(f"Key (hex): {final_key.hex()[:32]}...")
 
-    # ── Step 10: Receive & Decrypt File ──
-    section("Phase 5: Secure File Reception")
+    # ── Step 10: Receive & Decrypt File (Chunked Streaming) ──
+    section("Phase 5: Secure File Reception (Chunked Streaming)")
 
     aes_key = derive_aes_key(final_key)
 
     status("Receiving encrypted file metadata...")
     file_meta = recv_json(conn)
     filename = file_meta["filename"]
-    nonce = bytes.fromhex(file_meta["nonce"])
-    tag = bytes.fromhex(file_meta["tag"])
-    file_size = file_meta["size"]
+    total_size = file_meta["total_size"]
+    chunk_size = file_meta["chunk_size"]
+    num_chunks = file_meta["num_chunks"]
+    base_nonce = bytes.fromhex(file_meta["base_nonce"])
 
-    status(f"File: {filename} ({file_size} bytes encrypted)")
-    status(f"Nonce: {nonce.hex()}")
-    status(f"Auth tag: {tag.hex()}")
+    status(f"File: {filename} ({total_size} bytes, {num_chunks} chunks of {chunk_size // 1024} KB)")
 
-    status("Receiving encrypted file data...")
-    ciphertext = recv_bytes(conn)
-    success(f"Received {len(ciphertext)} bytes of ciphertext")
+    output_path = f"received_{filename}"
+    status(f"Receiving and decrypting {num_chunks} chunks...")
 
-    status("Decrypting file with AES-256-GCM...")
     try:
-        plaintext = decrypt_file(ciphertext, aes_key, nonce, tag)
-        output_path = f"received_{filename}"
+        bytes_written = 0
         with open(output_path, "wb") as f:
-            f.write(plaintext)
-        success(f"File decrypted and saved as '{output_path}'")
-        success(f"Authentication tag verified — file integrity confirmed!")
+            for i in range(num_chunks):
+                # Receive tag (16 B) + ciphertext
+                chunk_data = recv_bytes(conn)
+                tag = chunk_data[:16]
+                ciphertext = chunk_data[16:]
+
+                nonce = derive_chunk_nonce(base_nonce, i)
+                plaintext = decrypt_chunk(ciphertext, aes_key, nonce, tag)
+                f.write(plaintext)
+                bytes_written += len(plaintext)
+
+                if (i + 1) % 100 == 0 or i == num_chunks - 1:
+                    pct = (i + 1) / num_chunks * 100
+                    status(f"  Decrypted chunk {i+1}/{num_chunks} ({pct:.1f}%)")
+
+        success(f"File decrypted and saved as '{output_path}' ({bytes_written} bytes)")
+        success(f"All {num_chunks} chunk authentication tags verified!")
     except Exception as e:
         error(f"Decryption FAILED: {e}")
         error("Authentication tag mismatch — file may have been tampered with!")
@@ -277,6 +287,7 @@ def main():
     status(f"Sifted key length: {len(sifted_bob)} bits")
     status(f"Final key length: {len(final_key) * 8} bits")
     status(f"QBER: {qber*100:.2f}%")
+    status(f"File chunks: {num_chunks} × {chunk_size // 1024} KB")
 
     conn.close()
     server.close()
