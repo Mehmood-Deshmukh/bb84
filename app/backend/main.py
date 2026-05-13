@@ -201,12 +201,20 @@ async def respond_transfer(data: dict):
             subprocess.Popen([python_exe, "-u", bob_path], cwd=os.path.dirname(bob_path))
         threading.Thread(target=run_bob, daemon=True).start()
         
+        # Determine actual BOB_PORT from config
+        sys.path.append(os.path.dirname(bob_path))
         try:
-            req_data = json.dumps({"target_port": 5000}).encode()
+            import config
+            bob_port = config.BOB_PORT
+        except:
+            bob_port = 65432
+            
+        try:
+            req_data = json.dumps({"target_port": bob_port}).encode()
             req_obj = urllib.request.Request(f"http://{sender_ip}:8000/api/start-alice", data=req_data, headers={'Content-Type': 'application/json'})
             urllib.request.urlopen(req_obj)
         except Exception as e:
-            pass
+            print(f"[!] HTTP Error notifying Alice to start: {e}")
         return {"status": "accepted"}
     else:
         try:
@@ -223,7 +231,7 @@ async def start_alice(data: dict):
     import sys
     import threading
 
-    target_port = data.get("target_port", 5000)
+    target_port = data.get("target_port", 65432)
     filepath = alice_pending_transfer.get("filepath")
     filename = alice_pending_transfer.get("filename")
     target_ip = alice_pending_transfer.get("target_ip")
@@ -274,8 +282,8 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     active_connections.clear()
     active_connections.append(websocket)
-    await websocket.send_json({"type": "info", "message": f"Connected to {NODE_NAME}"})
     try:
+        await websocket.send_json({"type": "info", "message": f"Connected to {NODE_NAME}"})
         while True:
             data = await websocket.receive_text()
             await websocket.send_json({"type": "echo", "message": f"Received: {data}"})
