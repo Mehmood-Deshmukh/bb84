@@ -18,6 +18,7 @@ NODE_NAME = f"QKD-Node-{socket.gethostname()}-{NODE_ID}"
 zeroconf_instance = None
 browser = None
 discovered_peers = {}
+current_info = None
 
 from zeroconf.asyncio import AsyncServiceInfo
 
@@ -53,9 +54,9 @@ class PeerListener:
     def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         self.add_service(zc, type_, name)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global zeroconf_instance, browser
+async def register_mdns(name: str):
+    global current_info, zeroconf_instance, NODE_NAME
+    NODE_NAME = name
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(('10.255.255.255', 1))
@@ -67,21 +68,30 @@ async def lifespan(app: FastAPI):
         
     info = ServiceInfo(
         SERVICE_TYPE,
-        f"{NODE_NAME}.{SERVICE_TYPE}",
+        f"{name}.{SERVICE_TYPE}",
         addresses=[socket.inet_aton(local_ip)],
         port=SERVICE_PORT,
         properties={'version': '1.0', 'status': 'available'},
-        server=f"{NODE_NAME}.local."
+        server=f"{name}.local."
     )
     
+    if current_info and zeroconf_instance:
+        await zeroconf_instance.async_unregister_service(current_info)
+        
+    if zeroconf_instance:
+        await zeroconf_instance.async_register_service(info)
+    current_info = info
+    print(f"[*] Registered mDNS service: {name} at {local_ip}:{SERVICE_PORT}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global zeroconf_instance, browser
     zeroconf_instance = AsyncZeroconf()
-    await zeroconf_instance.async_register_service(info)
+    await register_mdns(NODE_NAME)
     
     # Start discovering other peers
     listener = PeerListener()
     browser = AsyncServiceBrowser(zeroconf_instance.zeroconf, SERVICE_TYPE, listener)
-    
-    print(f"[*] Registered mDNS service: {NODE_NAME} at {local_ip}:{SERVICE_PORT}")
     
     yield
     
@@ -106,10 +116,36 @@ app.add_middleware(
 def health_check():
     return {"status": "ok", "node": NODE_NAME}
 
+@app.post("/api/set-username")
+async def set_username(data: dict):
+    username = data.get("username")
+    if not username:
+        return {"status": "error"}
+    await register_mdns(username)
+    return {"status": "ok", "username": username}
+
 @app.get("/api/peers")
 def get_peers():
-    # Return all discovered peers except ourselves
-    active_peers = [p for p in discovered_peers.values() if p['name'] != NODE_NAME]
+    import urllib.request
+    import concurrent.futures
+    
+    def check_peer(p):
+        try:
+            req = urllib.request.Request(f"http://{p['ip']}:{p['port']}/api/health")
+            with urllib.request.urlopen(req, timeout=0.5) as resp:
+                if resp.status == 200:
+                    return p
+        except:
+            return None
+            
+    active_peers = []
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(check_peer, p) for p in discovered_peers.values() if p['name'] != NODE_NAME]
+        for f in concurrent.futures.as_completed(futures):
+            res = f.result()
+            if res:
+                active_peers.append(res)
+    
     return {"peers": active_peers}
 
 @app.post("/api/transfer")
@@ -192,14 +228,35 @@ async def respond_transfer(data: dict):
     req = pending_requests.pop(transfer_id)
     sender_ip = req["sender_ip"]
     
+    loop = asyncio.get_running_loop()
+    
     if data["accept"]:
         bob_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "bob.py")
         root_venv_python = os.path.join(os.path.dirname(bob_path), ".venv", "bin", "python")
         python_exe = root_venv_python if os.path.exists(root_venv_python) else sys.executable
         
-        def run_bob():
-            subprocess.Popen([python_exe, "-u", bob_path], cwd=os.path.dirname(bob_path))
-        threading.Thread(target=run_bob, daemon=True).start()
+        def run_bob_bg():
+            import re
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            asyncio.run_coroutine_threadsafe(broadcast_log("[*] Receiver launched, waiting for sender..."), loop)
+            
+            process = subprocess.Popen(
+                [python_exe, "-u", bob_path],
+                cwd=os.path.dirname(bob_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            for line in iter(process.stdout.readline, ''):
+                clean_line = ansi_escape.sub('', line).strip()
+                if clean_line:
+                    asyncio.run_coroutine_threadsafe(broadcast_log(clean_line), loop)
+            process.stdout.close()
+            process.wait()
+            asyncio.run_coroutine_threadsafe(broadcast_log("[*] Receiver Process Complete"), loop)
+
+        threading.Thread(target=run_bob_bg, daemon=True).start()
         
         # Determine actual BOB_PORT from config
         sys.path.append(os.path.dirname(bob_path))
