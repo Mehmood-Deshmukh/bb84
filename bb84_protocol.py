@@ -16,6 +16,7 @@ References:
   - Lo, Ma & Chen, 2005 (Decoy-state BB84 security proof)
 """
 
+from __future__ import annotations
 import random
 import hashlib
 import struct

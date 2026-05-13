@@ -17,6 +17,7 @@ Usage:
     python alice.py <file_to_send> --eve-mode   # Connect to Eve's proxy port
 """
 
+from __future__ import annotations
 import sys
 import os
 import json

@@ -14,6 +14,7 @@ Usage:
     python bob.py
 """
 
+from __future__ import annotations
 import json
 import struct
 import socket

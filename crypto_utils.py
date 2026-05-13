@@ -10,6 +10,7 @@ AES-GCM (Galois/Counter Mode) provides:
   - Authenticity: only holders of the key can create valid ciphertexts
 """
 
+from __future__ import annotations
 import os
 import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM

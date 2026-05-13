@@ -16,6 +16,7 @@ an unknown quantum state; her measurement collapses the superposition,
 introducing detectable errors (~25% QBER).
 """
 
+from __future__ import annotations
 import random
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import Aer
