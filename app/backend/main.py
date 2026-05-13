@@ -97,8 +97,9 @@ async def lifespan(app: FastAPI):
     
     if browser:
         await browser.async_cancel()
+    if zeroconf_instance and current_info:
+        await zeroconf_instance.async_unregister_service(current_info)
     if zeroconf_instance:
-        await zeroconf_instance.async_unregister_service(info)
         await zeroconf_instance.async_close()
         print("[*] Unregistered mDNS service.")
 
@@ -111,6 +112,44 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def append_to_history(entry_type, filename, peer_ip, status):
+    import json
+    from datetime import datetime
+    history_file = os.path.join(os.path.dirname(__file__), "history.json")
+    history = []
+    if os.path.exists(history_file):
+        try:
+            with open(history_file, "r") as f:
+                history = json.load(f)
+        except:
+            pass
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "type": entry_type,
+        "filename": filename,
+        "peer_ip": peer_ip,
+        "status": status
+    }
+    history.insert(0, entry)
+    history = history[:50]
+    try:
+        with open(history_file, "w") as f:
+            json.dump(history, f, indent=2)
+    except:
+        pass
+
+@app.get("/api/history")
+def get_history():
+    import json
+    history_file = os.path.join(os.path.dirname(__file__), "history.json")
+    if os.path.exists(history_file):
+        try:
+            with open(history_file, "r") as f:
+                return {"history": json.load(f)}
+        except:
+            pass
+    return {"history": []}
 
 @app.get("/api/health")
 def health_check():
@@ -255,6 +294,7 @@ async def respond_transfer(data: dict):
             process.stdout.close()
             process.wait()
             asyncio.run_coroutine_threadsafe(broadcast_log("[*] Receiver Process Complete"), loop)
+            append_to_history("RECEIVED", req["filename"], sender_ip, "Completed")
 
         threading.Thread(target=run_bob_bg, daemon=True).start()
         
@@ -325,6 +365,7 @@ async def start_alice(data: dict):
         process.stdout.close()
         process.wait()
         asyncio.run_coroutine_threadsafe(broadcast_log(f"[*] Transfer Process Complete"), loop)
+        append_to_history("SENT", filename, target_ip, "Completed")
 
     threading.Thread(target=run_alice_bg, daemon=True).start()
     return {"status": "ok"}
