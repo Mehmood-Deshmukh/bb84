@@ -7,6 +7,7 @@ function App() {
   const [selectedFile, setSelectedFile] = useState(null)
   const [toast, setToast] = useState(null)
   const [logs, setLogs] = useState([])
+  const [incomingRequest, setIncomingRequest] = useState(null)
 
   const showToast = (message, type = 'info') => {
     setToast({ message, type })
@@ -60,6 +61,8 @@ function App() {
           setStatus(`CONNECTED: ${data.message}`)
         } else if (data.type === 'transfer_log') {
           setLogs(prev => [...prev, data.message])
+        } else if (data.type === 'incoming_request') {
+          setIncomingRequest(data)
         }
       }
       
@@ -97,6 +100,51 @@ function App() {
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen w-full p-6 font-sans relative">
+      {incomingRequest && (
+        <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4">
+          <div className="bg-gruvbox-bg border-4 border-gruvbox-yellow-bright p-8 max-w-lg w-full" style={{ boxShadow: '8px 8px 0 var(--color-gruvbox-yellow-bright)' }}>
+            <h2 className="text-3xl font-black text-gruvbox-yellow-bright uppercase tracking-tighter mb-4">
+              Incoming Transmission!
+            </h2>
+            <div className="bg-gruvbox-bg-hard border-2 border-gruvbox-bg-soft p-4 font-mono text-sm text-gruvbox-fg mb-6">
+              <p className="mb-2"><span className="text-gruvbox-fg-bright font-bold">NODE IP:</span> {incomingRequest.data.sender_ip}</p>
+              <p className="mb-2"><span className="text-gruvbox-fg-bright font-bold">FILE:</span> {incomingRequest.data.filename}</p>
+              <p><span className="text-gruvbox-fg-bright font-bold">SIZE:</span> {incomingRequest.data.file_size} bytes</p>
+            </div>
+            <div className="flex justify-end gap-4">
+              <button 
+                onClick={async () => {
+                  await fetch('http://127.0.0.1:8000/api/respond-transfer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ transfer_id: incomingRequest.transfer_id, accept: false })
+                  })
+                  setIncomingRequest(null)
+                  showToast("Transmission Rejected.", 'error')
+                }}
+                className="bg-gruvbox-red-bright hover:bg-gruvbox-red-dark text-gruvbox-bg-hard font-black font-mono py-2 px-4 uppercase tracking-widest transition-colors"
+              >
+                Reject
+              </button>
+              <button 
+                onClick={async () => {
+                  await fetch('http://127.0.0.1:8000/api/respond-transfer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ transfer_id: incomingRequest.transfer_id, accept: true })
+                  })
+                  setIncomingRequest(null)
+                  showToast("Transmission Accepted. Receiver Initialized.", 'success')
+                }}
+                className="bg-gruvbox-green-bright hover:bg-gruvbox-fg-bright text-gruvbox-bg-hard font-black font-mono py-2 px-4 uppercase tracking-widest transition-colors"
+              >
+                Accept
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {toast && (
         <div className={`fixed top-6 right-6 p-4 border-2 font-mono font-bold uppercase tracking-widest z-50 ${toast.type === 'error' ? 'bg-gruvbox-red-bright border-gruvbox-bg-soft text-gruvbox-bg-hard' : 'bg-gruvbox-green-bright border-gruvbox-bg-soft text-gruvbox-bg-hard'}`} style={{ boxShadow: '4px 4px 0 var(--color-gruvbox-fg-bright)' }}>
           {toast.message}

@@ -120,27 +120,125 @@ async def initiate_transfer(
 ):
     import tempfile
     import shutil
-    import subprocess
-    import sys
-    import re
+    import socket
+    import urllib.request
+    import json
+    import threading
 
-    # Save file to a temporary directory
     temp_dir = tempfile.mkdtemp()
     filepath = os.path.join(temp_dir, file.filename)
     with open(filepath, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('10.255.255.255', 1))
+        my_ip = s.getsockname()[0]
+    except:
+        my_ip = '127.0.0.1'
+    finally:
+        s.close()
+        
+    global alice_pending_transfer
+    alice_pending_transfer = {
+        "filepath": filepath,
+        "filename": file.filename,
+        "target_ip": target_ip
+    }
+    
+    data = json.dumps({
+        "filename": file.filename,
+        "file_size": os.path.getsize(filepath),
+        "sender_ip": my_ip
+    }).encode()
+    
+    def send_req():
+        try:
+            req = urllib.request.Request(f"http://{target_ip}:8000/api/request-transfer", data=data, headers={'Content-Type': 'application/json'})
+            urllib.request.urlopen(req, timeout=5)
+        except Exception as e:
+            pass
+            
+    threading.Thread(target=send_req, daemon=True).start()
+    return {"status": "ok", "message": "Request sent to peer. Waiting for acceptance..."}
+
+pending_requests = {}
+alice_pending_transfer = {}
+
+@app.post("/api/request-transfer")
+async def request_transfer(data: dict):
+    transfer_id = str(uuid.uuid4())[:8]
+    pending_requests[transfer_id] = data
+    for conn in list(active_connections):
+        try:
+            await conn.send_json({"type": "incoming_request", "transfer_id": transfer_id, "data": data})
+        except:
+            pass
+    return {"status": "pending"}
+
+@app.post("/api/respond-transfer")
+async def respond_transfer(data: dict):
+    import os
+    import sys
+    import subprocess
+    import threading
+    import urllib.request
+    import json
+
+    transfer_id = data["transfer_id"]
+    if transfer_id not in pending_requests:
+        return {"status": "error", "message": "Invalid transfer ID"}
+    req = pending_requests.pop(transfer_id)
+    sender_ip = req["sender_ip"]
+    
+    if data["accept"]:
+        bob_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "bob.py")
+        root_venv_python = os.path.join(os.path.dirname(bob_path), ".venv", "bin", "python")
+        python_exe = root_venv_python if os.path.exists(root_venv_python) else sys.executable
+        
+        def run_bob():
+            subprocess.Popen([python_exe, "-u", bob_path], cwd=os.path.dirname(bob_path))
+        threading.Thread(target=run_bob, daemon=True).start()
+        
+        try:
+            req_data = json.dumps({"target_port": 5000}).encode()
+            req_obj = urllib.request.Request(f"http://{sender_ip}:8000/api/start-alice", data=req_data, headers={'Content-Type': 'application/json'})
+            urllib.request.urlopen(req_obj)
+        except Exception as e:
+            pass
+        return {"status": "accepted"}
+    else:
+        try:
+            req_obj = urllib.request.Request(f"http://{sender_ip}:8000/api/reject-alice", data=b"{}", headers={'Content-Type': 'application/json'})
+            urllib.request.urlopen(req_obj)
+        except:
+            pass
+        return {"status": "rejected"}
+
+@app.post("/api/start-alice")
+async def start_alice(data: dict):
+    import re
+    import subprocess
+    import sys
+    import threading
+
+    target_port = data.get("target_port", 5000)
+    filepath = alice_pending_transfer.get("filepath")
+    filename = alice_pending_transfer.get("filename")
+    target_ip = alice_pending_transfer.get("target_ip")
+    
+    if not filepath:
+        return {"status": "error"}
+
     loop = asyncio.get_running_loop()
 
-    def run_alice():
+    def run_alice_bg():
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        
-        # Run alice.py with the root project's Python interpreter to access qiskit
         alice_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "alice.py")
         root_venv_python = os.path.join(os.path.dirname(alice_path), ".venv", "bin", "python")
         python_exe = root_venv_python if os.path.exists(root_venv_python) else sys.executable
-
-        asyncio.run_coroutine_threadsafe(broadcast_log(f"[*] Starting transfer of {file.filename} to {target_ip}:{target_port}"), loop)
+        
+        asyncio.run_coroutine_threadsafe(broadcast_log(f"[*] Peer ACCEPTED! Starting transfer of {filename} to {target_ip}:{target_port}"), loop)
 
         process = subprocess.Popen(
             [python_exe, "-u", alice_path, filepath, "--host", target_ip, "--port", str(target_port)],
@@ -150,24 +248,30 @@ async def initiate_transfer(
             text=True,
             bufsize=1
         )
-
         for line in iter(process.stdout.readline, ''):
             clean_line = ansi_escape.sub('', line).strip()
             if clean_line:
                 asyncio.run_coroutine_threadsafe(broadcast_log(clean_line), loop)
-
         process.stdout.close()
         process.wait()
         asyncio.run_coroutine_threadsafe(broadcast_log(f"[*] Transfer Process Complete"), loop)
 
-    # Start alice.py in the background so we don't block the API response
-    background_tasks.add_task(run_alice)
-    
-    return {"status": "ok", "message": "Transfer process started."}
+    threading.Thread(target=run_alice_bg, daemon=True).start()
+    return {"status": "ok"}
+
+@app.post("/api/reject-alice")
+async def reject_alice():
+    for conn in list(active_connections):
+        try:
+            await conn.send_json({"type": "transfer_log", "message": "[!] Transfer REJECTED by peer."})
+        except:
+            pass
+    return {"status": "ok"}
 
 @app.websocket("/api/ws/status")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    active_connections.clear()
     active_connections.append(websocket)
     await websocket.send_json({"type": "info", "message": f"Connected to {NODE_NAME}"})
     try:
