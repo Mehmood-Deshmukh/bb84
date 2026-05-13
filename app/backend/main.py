@@ -20,6 +20,16 @@ discovered_peers = {}
 
 from zeroconf.asyncio import AsyncServiceInfo
 
+active_connections = []
+
+async def broadcast_log(message: str):
+    for conn in list(active_connections):
+        try:
+            await conn.send_json({"type": "transfer_log", "message": message})
+        except:
+            if conn in active_connections:
+                active_connections.remove(conn)
+
 class PeerListener:
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         if name in discovered_peers:
@@ -112,6 +122,7 @@ async def initiate_transfer(
     import shutil
     import subprocess
     import sys
+    import re
 
     # Save file to a temporary directory
     temp_dir = tempfile.mkdtemp()
@@ -119,28 +130,55 @@ async def initiate_transfer(
     with open(filepath, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    loop = asyncio.get_running_loop()
+
     def run_alice():
-        print(f"[*] Starting background transfer of {file.filename} to {target_ip}:{target_port}")
-        # Run alice.py with the correct Python interpreter using absolute path
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        
+        # Run alice.py with the root project's Python interpreter to access qiskit
         alice_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "alice.py")
-        subprocess.run([sys.executable, alice_path, filepath, "--host", target_ip, "--port", str(target_port)], cwd=os.path.dirname(alice_path))
-        print(f"[*] Finished background transfer of {file.filename}")
+        root_venv_python = os.path.join(os.path.dirname(alice_path), ".venv", "bin", "python")
+        python_exe = root_venv_python if os.path.exists(root_venv_python) else sys.executable
+
+        asyncio.run_coroutine_threadsafe(broadcast_log(f"[*] Starting transfer of {file.filename} to {target_ip}:{target_port}"), loop)
+
+        process = subprocess.Popen(
+            [python_exe, "-u", alice_path, filepath, "--host", target_ip, "--port", str(target_port)],
+            cwd=os.path.dirname(alice_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        for line in iter(process.stdout.readline, ''):
+            clean_line = ansi_escape.sub('', line).strip()
+            if clean_line:
+                asyncio.run_coroutine_threadsafe(broadcast_log(clean_line), loop)
+
+        process.stdout.close()
+        process.wait()
+        asyncio.run_coroutine_threadsafe(broadcast_log(f"[*] Transfer Process Complete"), loop)
 
     # Start alice.py in the background so we don't block the API response
     background_tasks.add_task(run_alice)
     
-    return {"status": "ok", "message": f"Transfer of {file.filename} to {target_ip}:{target_port} started in background."}
+    return {"status": "ok", "message": "Transfer process started."}
 
 @app.websocket("/api/ws/status")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    active_connections.append(websocket)
     await websocket.send_json({"type": "info", "message": f"Connected to {NODE_NAME}"})
     try:
         while True:
             data = await websocket.receive_text()
             await websocket.send_json({"type": "echo", "message": f"Received: {data}"})
     except Exception as e:
-        print(f"WebSocket closed: {e}")
+        pass
+    finally:
+        if websocket in active_connections:
+            active_connections.remove(websocket)
 
 if __name__ == "__main__":
     import uvicorn

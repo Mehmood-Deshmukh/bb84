@@ -5,10 +5,17 @@ function App() {
   const [peers, setPeers] = useState([])
   const [socket, setSocket] = useState(null)
   const [selectedFile, setSelectedFile] = useState(null)
+  const [toast, setToast] = useState(null)
+  const [logs, setLogs] = useState([])
+
+  const showToast = (message, type = 'info') => {
+    setToast({ message, type })
+    setTimeout(() => setToast(null), 4000)
+  }
 
   const handleConnect = async (peer) => {
     if (!selectedFile) {
-      alert("[ ERROR ] PLEASE SELECT A FILE TO TRANSMIT FIRST.")
+      showToast("[ ERROR ] PLEASE SELECT A FILE TO TRANSMIT FIRST.", 'error')
       return
     }
 
@@ -17,6 +24,8 @@ function App() {
     formData.append("target_ip", peer.ip)
     formData.append("target_port", peer.port)
 
+    setLogs([])
+
     try {
       const response = await fetch('http://127.0.0.1:8000/api/transfer', {
         method: 'POST',
@@ -24,12 +33,12 @@ function App() {
       })
       const data = await response.json()
       if (data.status === 'ok') {
-        alert("[ SUCCESS ] TRANSFER INITIATED: " + data.message)
+        showToast("[ SUCCESS ] " + data.message, 'success')
       } else {
-        alert("[ ERROR ] " + data.detail)
+        showToast("[ ERROR ] " + data.detail, 'error')
       }
     } catch (err) {
-      alert("[ ERROR ] INITIATING TRANSFER: " + err.message)
+      showToast("[ ERROR ] INITIATING TRANSFER: " + err.message, 'error')
     }
   }
 
@@ -49,6 +58,8 @@ function App() {
         const data = JSON.parse(event.data)
         if (data.type === 'info') {
           setStatus(`CONNECTED: ${data.message}`)
+        } else if (data.type === 'transfer_log') {
+          setLogs(prev => [...prev, data.message])
         }
       }
       
@@ -85,7 +96,13 @@ function App() {
   }, [])
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen w-full p-6 font-sans">
+    <div className="flex flex-col items-center justify-center min-h-screen w-full p-6 font-sans relative">
+      {toast && (
+        <div className={`fixed top-6 right-6 p-4 border-2 font-mono font-bold uppercase tracking-widest z-50 ${toast.type === 'error' ? 'bg-gruvbox-red-bright border-gruvbox-bg-soft text-gruvbox-bg-hard' : 'bg-gruvbox-green-bright border-gruvbox-bg-soft text-gruvbox-bg-hard'}`} style={{ boxShadow: '4px 4px 0 var(--color-gruvbox-fg-bright)' }}>
+          {toast.message}
+        </div>
+      )}
+
       <div className="w-full max-w-3xl mb-12">
         <h1 className="text-6xl font-black text-gruvbox-orange-bright tracking-tighter uppercase mb-4">
           QKD NODE
@@ -113,6 +130,21 @@ function App() {
           </p>
         )}
       </div>
+
+      {logs.length > 0 && (
+        <div className="w-full max-w-3xl bg-gruvbox-bg border-4 border-gruvbox-fg-bright p-6 mb-8" style={{ boxShadow: '8px 8px 0 var(--color-gruvbox-fg-bright)' }}>
+          <div className="flex justify-between items-end mb-4 border-b-4 border-gruvbox-bg-soft pb-2">
+            <h2 className="text-2xl font-black text-gruvbox-fg-bright uppercase tracking-tighter">
+              Transfer Terminal
+            </h2>
+          </div>
+          <div className="bg-gruvbox-bg-hard p-4 h-64 overflow-y-auto font-mono text-sm text-gruvbox-green-bright border-2 border-gruvbox-bg-soft">
+            {logs.map((log, idx) => (
+              <div key={idx} className="mb-1 leading-tight">{log}</div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="w-full max-w-3xl bg-gruvbox-bg border-4 border-gruvbox-fg-bright p-8" style={{ boxShadow: '8px 8px 0 var(--color-gruvbox-fg-bright)' }}>
         <div className="flex justify-between items-end mb-8 border-b-4 border-gruvbox-bg-soft pb-4">
@@ -144,7 +176,7 @@ function App() {
                   onClick={() => handleConnect(peer)}
                   className="bg-gruvbox-green-bright hover:bg-gruvbox-fg-bright text-gruvbox-bg-hard font-black font-mono py-3 px-6 transition-colors uppercase tracking-widest"
                 >
-                  Connect
+                  Initiate QKD & Transfer
                 </button>
               </div>
             ))}
