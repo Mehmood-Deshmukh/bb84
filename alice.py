@@ -233,7 +233,6 @@ def main():
     }
     send_json(sock, file_meta)
 
-    # Stream: read chunk → encrypt → send
     with open(filepath, "rb") as f:
         for i in range(num_chunks):
             plaintext_chunk = f.read(CHUNK_SIZE)
@@ -248,7 +247,6 @@ def main():
 
     success(f"Encrypted file '{filename}' streamed to Bob ({num_chunks} chunks)")
 
-    # ── Done ──
     section("Transfer Complete")
     success(f"File securely transferred using BB84 QKD + AES-256-GCM")
     status(f"Quantum key bits used: {NUM_QUBITS}")
