@@ -47,7 +47,7 @@ from bb84_protocol import (
     privacy_amplification,
 )
 
-from crypto_utils import derive_aes_key, encrypt_file, derive_chunk_nonce, encrypt_chunk
+from crypto_utils import derive_aes_key, derive_chunk_nonce, encrypt_chunk
 
 
 class Colors:

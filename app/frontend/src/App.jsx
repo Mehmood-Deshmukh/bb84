@@ -7,24 +7,33 @@ function App() {
 
   useEffect(() => {
     // 1. Establish WebSocket connection
-    const ws = new WebSocket('ws://127.0.0.1:8000/api/ws/status')
-    
-    ws.onopen = () => {
-      setStatus('CONNECTED TO BACKEND')
-    }
-    
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      if (data.type === 'info') {
-        setStatus(`CONNECTED: ${data.message}`)
+    let ws;
+    let reconnectTimeout;
+
+    const connectWebSocket = () => {
+      ws = new WebSocket('ws://127.0.0.1:8000/api/ws/status')
+      
+      ws.onopen = () => {
+        setStatus('CONNECTED TO BACKEND')
       }
-    }
-    
-    ws.onclose = () => {
-      setStatus('DISCONNECTED. RETRYING...')
+      
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data)
+        if (data.type === 'info') {
+          setStatus(`CONNECTED: ${data.message}`)
+        }
+      }
+      
+      ws.onclose = () => {
+        setStatus('DISCONNECTED. RETRYING...')
+        // Try to reconnect in 2 seconds
+        reconnectTimeout = setTimeout(connectWebSocket, 2000)
+      }
+
+      setSocket(ws)
     }
 
-    setSocket(ws)
+    connectWebSocket()
 
     // 2. Poll for discovered peers
     const fetchPeers = async () => {
@@ -41,7 +50,8 @@ function App() {
     const interval = setInterval(fetchPeers, 2000)
 
     return () => {
-      ws.close()
+      if (ws) ws.close()
+      clearTimeout(reconnectTimeout)
       clearInterval(interval)
     }
   }, [])

@@ -3,15 +3,22 @@ import socket
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
+from zeroconf import ServiceInfo, Zeroconf
+from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
+
+import os
+import uuid
 
 SERVICE_TYPE = "_qkd._tcp.local."
-SERVICE_PORT = 8000
-NODE_NAME = f"QKD-Node-{socket.gethostname()}"
+SERVICE_PORT = int(os.environ.get("PORT", 8000))
+NODE_ID = str(uuid.uuid4())[:4]
+NODE_NAME = f"QKD-Node-{socket.gethostname()}-{NODE_ID}"
 
 zeroconf_instance = None
 browser = None
 discovered_peers = {}
+
+from zeroconf.asyncio import AsyncServiceInfo
 
 class PeerListener:
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
@@ -19,8 +26,12 @@ class PeerListener:
             del discovered_peers[name]
 
     def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
-        info = zc.get_service_info(type_, name)
-        if info:
+        asyncio.create_task(self._async_add_service(zc, type_, name))
+
+    async def _async_add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+        info = AsyncServiceInfo(type_, name)
+        await info.async_request(zc, 3000)
+        if info and info.addresses:
             addresses = [socket.inet_ntoa(addr) for addr in info.addresses]
             discovered_peers[name] = {
                 "name": name.replace(f".{SERVICE_TYPE}", ""),
@@ -52,22 +63,22 @@ async def lifespan(app: FastAPI):
         server=f"{NODE_NAME}.local."
     )
     
-    zeroconf_instance = Zeroconf()
-    zeroconf_instance.register_service(info)
+    zeroconf_instance = AsyncZeroconf()
+    await zeroconf_instance.async_register_service(info)
     
     # Start discovering other peers
     listener = PeerListener()
-    browser = ServiceBrowser(zeroconf_instance, SERVICE_TYPE, listener)
+    browser = AsyncServiceBrowser(zeroconf_instance.zeroconf, SERVICE_TYPE, listener)
     
     print(f"[*] Registered mDNS service: {NODE_NAME} at {local_ip}:{SERVICE_PORT}")
     
     yield
     
     if browser:
-        browser.cancel()
+        await browser.async_cancel()
     if zeroconf_instance:
-        zeroconf_instance.unregister_service(info)
-        zeroconf_instance.close()
+        await zeroconf_instance.async_unregister_service(info)
+        await zeroconf_instance.async_close()
         print("[*] Unregistered mDNS service.")
 
 app = FastAPI(title="QKD Backend Node", lifespan=lifespan)
