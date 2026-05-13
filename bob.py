@@ -126,15 +126,24 @@ def _recv_exact(sock, n: int) -> bytes:
 def main():
     banner()
 
-    # ── Step 1: Listen for Alice ──
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", BOB_PORT))
     server.listen(1)
 
     status(f"Listening on port {BOB_PORT}...")
-    status("Waiting for Alice's connection...")
-    conn, addr = server.accept()
+    status("Waiting for Alice's connection (60s timeout)...")
+    
+    server.settimeout(60.0)
+    try:
+        conn, addr = server.accept()
+    except socket.timeout:
+        error("Timed out waiting for Alice's connection.")
+        server.close()
+        import sys
+        sys.exit(1)
+        
+    server.settimeout(None)  # Reset timeout for the connection
     success(f"Alice connected from {addr}")
 
     # ── Step 2: Receive Qubits ──

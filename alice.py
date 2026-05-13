@@ -142,7 +142,19 @@ def main():
         status(f"Connecting to Bob at {host}:{port}")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((host, port))
+    
+    max_retries = 15
+    for attempt in range(max_retries):
+        try:
+            sock.connect((host, port))
+            break
+        except ConnectionRefusedError:
+            if attempt < max_retries - 1:
+                time.sleep(1.0)
+            else:
+                error(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
+                sys.exit(1)
+                
     success(f"Connected to {'Eve (proxy)' if eve_mode else 'Bob'}")
 
     section("Phase 1: Quantum Key Distribution (BB84)")

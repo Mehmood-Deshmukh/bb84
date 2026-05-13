@@ -231,6 +231,10 @@ async def start_alice(data: dict):
     import sys
     import threading
 
+    print("[!] Received request to start Alice")
+    print("[!] Target port: ", data.get("target_port"))
+    print("[!] Target IP: ", data.get("target_ip"))
+
     target_port = data.get("target_port", 65432)
     filepath = alice_pending_transfer.get("filepath")
     filename = alice_pending_transfer.get("filename")
