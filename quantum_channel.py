@@ -82,7 +82,6 @@ def apply_depolarizing_noise(qasm_str: str, p: float = NOISE_PROBABILITY) -> str
 
 
 def apply_channel_noise(qasm_strings: list[str], p: float = NOISE_PROBABILITY) -> list[str]:
-    """Apply depolarizing noise to a batch of qubits."""
     return [apply_depolarizing_noise(q, p) for q in qasm_strings]
 
 

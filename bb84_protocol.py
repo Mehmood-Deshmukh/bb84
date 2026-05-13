@@ -35,31 +35,23 @@ from config import (
 )
 
 
-# ─────────────────────────────────────────────
-# 1. Random Bit & Basis Generation
-# ─────────────────────────────────────────────
-
-# Shared QRNG backend
 _qrng_backend = Aer.get_backend("qasm_simulator")
 
 def _quantum_random_bits(n: int) -> list[int]:
-    """Generate n truly random bits using a quantum circuit (Hadamard gates)."""
     if n == 0:
         return []
-    # Create a 1-qubit circuit to avoid simulating large statevectors
+    
     qc = QuantumCircuit(1, 1)
-    qc.h(0)  # Apply Hadamard to put qubit in superposition
-    qc.measure(0, 0)  # Measure the qubit
+    qc.h(0)  
+    qc.measure(0, 0)  
     
     compiled = transpile(qc, _qrng_backend)
-    # Run n shots and get individual outcomes using memory=True
     result = _qrng_backend.run(compiled, shots=n, memory=True).result()
     memory = result.get_memory()
     
     return [int(b) for b in memory]
 
 def generate_random_bits(n: int) -> list[int]:
-    """Generate n truly random bits using a Quantum Random Number Generator (QRNG)."""
     return _quantum_random_bits(n)
 
 
@@ -74,9 +66,6 @@ def generate_random_bases(n: int) -> list[str]:
     return ["+" if b == 0 else "x" for b in bits]
 
 
-# ─────────────────────────────────────────────
-# 2. Decoy-State Intensity Tagging
-# ─────────────────────────────────────────────
 
 def tag_decoy_states(n: int) -> list[str]:
     """
@@ -193,7 +182,6 @@ def analyze_decoy_states(
             "intensity": DECOY_INTENSITIES[level],
         }
 
-    # Check for PNS attack signature
     sig_yield = stats["signal"]["yield"]
     dec_yield = stats["decoy"]["yield"] if stats["decoy"]["count"] > 0 else sig_yield
 
@@ -213,10 +201,6 @@ def analyze_decoy_states(
         f"  Yield difference: {yield_diff:.3f} ≤ threshold {PNS_YIELD_THRESHOLD}"
     )
 
-
-# ─────────────────────────────────────────────
-# 5. QBER Estimation
-# ─────────────────────────────────────────────
 
 def estimate_qber(
     sifted_alice: list[int],
@@ -245,7 +229,6 @@ def estimate_qber(
     n = len(sifted_alice)
     sample_size = max(1, int(n * sample_fraction))
 
-    # Random sample indices
     sample_indices = set(random.sample(range(n), min(sample_size, n)))
 
     errors = 0
@@ -255,7 +238,6 @@ def estimate_qber(
 
     qber = errors / len(sample_indices) if sample_indices else 0.0
 
-    # Remove sampled bits from key material
     remaining_alice = [sifted_alice[i] for i in range(n) if i not in sample_indices]
     remaining_bob = [sifted_bob[i] for i in range(n) if i not in sample_indices]
 
@@ -326,10 +308,6 @@ def reconcile_keys(
     return list(alice_bits), corrected_bob, errors_corrected
 
 
-# ─────────────────────────────────────────────
-# 7. Privacy Amplification
-# ─────────────────────────────────────────────
-
 def privacy_amplification(
     key_bits: list[int],
     target_bits: int = FINAL_KEY_BITS,
@@ -357,19 +335,16 @@ def privacy_amplification(
     Returns:
         A `target_bits // 8` byte key.
     """
-    # Convert bit list to bytes
     key_bytes = bits_to_bytes(key_bits)
 
     if salt is None:
         salt = struct.pack(">Q", random.getrandbits(64))
 
-    # Hash with salt for universal hashing
     h = hashlib.sha256()
     h.update(salt)
     h.update(key_bytes)
     digest = h.digest()
 
-    # Truncate to target length
     target_bytes = target_bits // 8
     return salt, digest[:target_bytes]
 

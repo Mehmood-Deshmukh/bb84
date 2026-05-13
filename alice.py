@@ -33,7 +33,9 @@ from config import (
     QBER_THRESHOLD,
     CHUNK_SIZE,
 )
+
 from quantum_channel import prepare_qubits, apply_channel_noise
+
 from bb84_protocol import (
     generate_random_bits,
     generate_random_bases,
@@ -44,12 +46,9 @@ from bb84_protocol import (
     reconcile_keys,
     privacy_amplification,
 )
-from crypto_utils import derive_aes_key, encrypt_chunk, derive_chunk_nonce
 
+from crypto_utils import derive_aes_key, encrypt_file
 
-# ─────────────────────────────────────────────
-# Pretty Printing Utilities
-# ─────────────────────────────────────────────
 
 class Colors:
     HEADER = "\033[95m"
@@ -62,15 +61,6 @@ class Colors:
     DIM = "\033[2m"
     END = "\033[0m"
 
-
-def banner():
-    print(f"""
-{Colors.CYAN}{Colors.BOLD}
-╔══════════════════════════════════════════════════════════╗
-║          🔐  BB84 QKD Secure File Transfer  🔐           ║
-║                    ━━━ ALICE (Sender) ━━━                ║
-╚══════════════════════════════════════════════════════════╝
-{Colors.END}""")
 
 
 def status(msg, color=Colors.BLUE):
@@ -136,30 +126,22 @@ def main():
     eve_mode = "--eve-mode" in sys.argv
     port = EVE_PORT if eve_mode else BOB_PORT
 
-    banner()
 
     if eve_mode:
         warning(f"EVE MODE: Connecting to Eve's proxy at port {port}")
     else:
         status(f"Connecting to Bob at {ALICE_HOST}:{port}")
 
-    # ── Step 1: Connect to Bob ──
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((ALICE_HOST, port))
     success(f"Connected to {'Eve (proxy)' if eve_mode else 'Bob'}")
 
-    # ── Step 2: Quantum Key Generation ──
     section("Phase 1: Quantum Key Distribution (BB84)")
 
     status(f"Generating {NUM_QUBITS} random bits and bases...")
     alice_bits = generate_random_bits(NUM_QUBITS)
     alice_bases = generate_random_bases(NUM_QUBITS)
-    intensity_tags = tag_decoy_states(NUM_QUBITS)
-
-    sig_count = intensity_tags.count("signal")
-    dec_count = intensity_tags.count("decoy")
-    vac_count = intensity_tags.count("vacuum")
-    status(f"Decoy-state tagging: {sig_count} signal, {dec_count} decoy, {vac_count} vacuum")
 
     status("Preparing qubits (encoding bits in quantum states)...")
     t0 = time.time()
@@ -167,105 +149,69 @@ def main():
     t1 = time.time()
     success(f"Prepared {NUM_QUBITS} qubits in {t1-t0:.2f}s")
 
-    # Apply channel noise (simulating fiber-optic transmission)
-    qasm_strings = apply_channel_noise(qasm_strings)
-    status("Applied depolarizing channel noise")
-
-    # ── Step 3: Send qubits to Bob ──
+    # Qubits are transmitted noiselessly in this simplified protocol
     status("Sending qubits over quantum channel...")
     send_json(sock, qasm_strings)
     success("Qubits transmitted ⟩⟩⟩")
 
-    # ── Step 4: Classical Channel — Basis Exchange ──
+
     section("Phase 2: Classical Channel (Basis Exchange)")
 
     status("Waiting for Bob's measurement bases...")
     bob_bases = recv_json(sock)
     success(f"Received Bob's bases ({len(bob_bases)} entries)")
 
-    status("Sending Alice's bases...")
-    send_json(sock, alice_bases)
+    section("Phase 3: Key Sifting & QBER Estimation")
 
-    # Send intensity tags for decoy analysis
-    status("Sending decoy-state intensity tags...")
-    send_json(sock, intensity_tags)
-
-    # ── Step 5: Basis Sifting ──
-    section("Phase 3: Key Sifting & Security Verification")
-
-    status("Waiting for Bob's measured bits...")
-    bob_bits = recv_json(sock)
-
-    sifted_alice, sifted_bob, sifted_tags = sift_keys(
-        alice_bits, alice_bases, bob_bits, bob_bases, intensity_tags
-    )
+    matching_indices = [i for i in range(NUM_QUBITS) if alice_bases[i] == bob_bases[i]]
+    sifted_alice = [alice_bits[i] for i in matching_indices]
     success(f"Sifted key: {len(sifted_alice)} bits (from {NUM_QUBITS} raw qubits)")
     status(f"Sift rate: {len(sifted_alice)/NUM_QUBITS*100:.1f}%")
 
-    # ── Step 6: Decoy-State Analysis ──
-    status("Running decoy-state analysis...")
-    decoy_stats, decoy_safe, decoy_msg = analyze_decoy_states(
-        sifted_alice, sifted_bob, sifted_tags
-    )
-    for line in decoy_msg.split("\n"):
-        if "ATTACK" in line:
-            error(line.strip())
-        else:
-            status(line.strip(), Colors.DIM)
+    status("Sending matching indices to Bob...")
+    send_json(sock, matching_indices)
 
-    if not decoy_safe:
-        error("ABORTING: Photon Number Splitting attack detected!")
-        send_json(sock, {"abort": True, "reason": "PNS attack detected"})
-        sock.close()
-        sys.exit(1)
-
-    # ── Step 7: QBER Estimation ──
     status("Estimating Quantum Bit Error Rate (QBER)...")
-    qber, remaining_alice, remaining_bob, sample_indices = estimate_qber(sifted_alice, sifted_bob)
+    import random
+    from config import QBER_SAMPLE_FRACTION
+    sample_size = max(1, int(len(sifted_alice) * QBER_SAMPLE_FRACTION))
+    sample_indices = sorted(random.sample(range(len(sifted_alice)), min(sample_size, len(sifted_alice))))
+    alice_sample_bits = [sifted_alice[i] for i in sample_indices]
+
+    status("Sending sample indices to Bob for QBER estimation...")
+    send_json(sock, {"sample_indices": sample_indices})
+
+    status("Waiting for Bob's sample bits...")
+    bob_req = recv_json(sock)
+    bob_sample_bits = bob_req["sample_bits"]
+
+    qber, _, _, _ = estimate_qber(alice_sample_bits, bob_sample_bits, sample_fraction=1.0)
+
+    send_json(sock, {"qber": qber})
 
     if qber < QBER_THRESHOLD:
         success(f"QBER = {qber*100:.2f}% (threshold: {QBER_THRESHOLD*100:.0f}%) — Channel is SECURE")
     else:
         error(f"QBER = {qber*100:.2f}% (threshold: {QBER_THRESHOLD*100:.0f}%) — EAVESDROPPER DETECTED!")
-
-    # Send QBER result + sample indices to Bob so he discards the same bits
-    send_json(sock, {
-        "qber": qber,
-        "abort": qber >= QBER_THRESHOLD,
-        "sample_indices": sample_indices,
-    })
-
-    if qber >= QBER_THRESHOLD:
-        error("ABORTING: QBER exceeds security threshold!")
         error("The quantum channel has been compromised.")
-        error("Possible intercept-resend attack by an eavesdropper.")
         sock.close()
         sys.exit(1)
 
-    # ── Step 8: Information Reconciliation ──
+
     section("Phase 4: Key Distillation")
 
-    status(f"Information reconciliation on {len(remaining_alice)} bits...")
-    reconciled_alice, reconciled_bob, errors_fixed = reconcile_keys(
-        remaining_alice, remaining_bob
-    )
-    success(f"Reconciliation complete: {errors_fixed} errors corrected")
+    remaining_alice = [sifted_alice[i] for i in range(len(sifted_alice)) if i not in sample_indices]
 
-    # Compute correction mask: which bit positions Bob needs to flip
-    corrections = [i for i in range(len(remaining_alice))
-                   if remaining_bob[i] != reconciled_bob[i]]
-    send_json(sock, {"corrections": corrections, "key_length": len(reconciled_alice)})
-
-    # ── Step 9: Privacy Amplification ──
     status("Privacy amplification (SHA-256 universal hashing)...")
-    salt, final_key = privacy_amplification(reconciled_alice)
+    salt, final_key = privacy_amplification(remaining_alice)
     success(f"Final key: {len(final_key) * 8}-bit AES key derived")
     status(f"Key (hex): {final_key.hex()[:32]}...")
 
-    # Send salt to Bob so he can derive the same key
+
     send_json(sock, {"salt": salt.hex()})
 
-    # ── Step 10: Chunked File Encryption & Streaming Transfer ──
+
+    section("Phase 5: Secure File Transfer")
     section("Phase 5: Secure File Transfer (Chunked Streaming)")
 
     aes_key = derive_aes_key(final_key)
@@ -278,7 +224,6 @@ def main():
     status(f"File: {filename} ({file_size} bytes)")
     status(f"Streaming as {num_chunks} chunk(s) of {CHUNK_SIZE // 1024} KB")
 
-    # Send file metadata
     file_meta = {
         "filename": filename,
         "total_size": file_size,
