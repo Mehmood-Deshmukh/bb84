@@ -126,17 +126,22 @@ def main():
 
     filepath = sys.argv[1]
     eve_mode = "--eve-mode" in sys.argv
+    
+    host = ALICE_HOST
     port = EVE_PORT if eve_mode else BOB_PORT
 
+    if "--host" in sys.argv:
+        host = sys.argv[sys.argv.index("--host") + 1]
+    if "--port" in sys.argv:
+        port = int(sys.argv[sys.argv.index("--port") + 1])
 
     if eve_mode:
-        warning(f"EVE MODE: Connecting to Eve's proxy at port {port}")
+        warning(f"EVE MODE: Connecting to Eve's proxy at {host}:{port}")
     else:
-        status(f"Connecting to Bob at {ALICE_HOST}:{port}")
-
+        status(f"Connecting to Bob at {host}:{port}")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((ALICE_HOST, port))
+    sock.connect((host, port))
     success(f"Connected to {'Eve (proxy)' if eve_mode else 'Bob'}")
 
     section("Phase 1: Quantum Key Distribution (BB84)")

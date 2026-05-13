@@ -1,7 +1,7 @@
 import asyncio
 import socket
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from zeroconf import ServiceInfo, Zeroconf
 from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
@@ -100,6 +100,36 @@ def get_peers():
     # Return all discovered peers except ourselves
     active_peers = [p for p in discovered_peers.values() if p['name'] != NODE_NAME]
     return {"peers": active_peers}
+
+@app.post("/api/transfer")
+async def initiate_transfer(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    target_ip: str = Form(...),
+    target_port: int = Form(...)
+):
+    import tempfile
+    import shutil
+    import subprocess
+    import sys
+
+    # Save file to a temporary directory
+    temp_dir = tempfile.mkdtemp()
+    filepath = os.path.join(temp_dir, file.filename)
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    def run_alice():
+        print(f"[*] Starting background transfer of {file.filename} to {target_ip}:{target_port}")
+        # Run alice.py with the correct Python interpreter using absolute path
+        alice_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "alice.py")
+        subprocess.run([sys.executable, alice_path, filepath, "--host", target_ip, "--port", str(target_port)], cwd=os.path.dirname(alice_path))
+        print(f"[*] Finished background transfer of {file.filename}")
+
+    # Start alice.py in the background so we don't block the API response
+    background_tasks.add_task(run_alice)
+    
+    return {"status": "ok", "message": f"Transfer of {file.filename} to {target_ip}:{target_port} started in background."}
 
 @app.websocket("/api/ws/status")
 async def websocket_endpoint(websocket: WebSocket):

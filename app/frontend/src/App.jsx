@@ -4,6 +4,34 @@ function App() {
   const [status, setStatus] = useState('CONNECTING...')
   const [peers, setPeers] = useState([])
   const [socket, setSocket] = useState(null)
+  const [selectedFile, setSelectedFile] = useState(null)
+
+  const handleConnect = async (peer) => {
+    if (!selectedFile) {
+      alert("[ ERROR ] PLEASE SELECT A FILE TO TRANSMIT FIRST.")
+      return
+    }
+
+    const formData = new FormData()
+    formData.append("file", selectedFile)
+    formData.append("target_ip", peer.ip)
+    formData.append("target_port", peer.port)
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/transfer', {
+        method: 'POST',
+        body: formData,
+      })
+      const data = await response.json()
+      if (data.status === 'ok') {
+        alert("[ SUCCESS ] TRANSFER INITIATED: " + data.message)
+      } else {
+        alert("[ ERROR ] " + data.detail)
+      }
+    } catch (err) {
+      alert("[ ERROR ] INITIATING TRANSFER: " + err.message)
+    }
+  }
 
   useEffect(() => {
     // 1. Establish WebSocket connection
@@ -70,6 +98,22 @@ function App() {
         </div>
       </div>
 
+      <div className="w-full max-w-3xl bg-gruvbox-bg border-4 border-gruvbox-fg-bright p-8 mb-8" style={{ boxShadow: '8px 8px 0 var(--color-gruvbox-fg-bright)' }}>
+        <h2 className="text-3xl font-black text-gruvbox-fg-bright uppercase tracking-tighter mb-4">
+          Select Payload
+        </h2>
+        <input 
+          type="file" 
+          onChange={(e) => setSelectedFile(e.target.files[0])}
+          className="w-full bg-gruvbox-bg-hard border-2 border-gruvbox-bg-soft p-4 text-gruvbox-fg-bright font-mono file:mr-4 file:py-2 file:px-4 file:border-0 file:text-sm file:font-black file:bg-gruvbox-orange-bright file:text-gruvbox-bg-hard hover:file:bg-gruvbox-fg-bright cursor-pointer"
+        />
+        {selectedFile && (
+          <p className="mt-4 text-gruvbox-green-bright font-mono font-bold text-sm uppercase">
+            [ READY TO TRANSMIT: {selectedFile.name} ]
+          </p>
+        )}
+      </div>
+
       <div className="w-full max-w-3xl bg-gruvbox-bg border-4 border-gruvbox-fg-bright p-8" style={{ boxShadow: '8px 8px 0 var(--color-gruvbox-fg-bright)' }}>
         <div className="flex justify-between items-end mb-8 border-b-4 border-gruvbox-bg-soft pb-4">
           <h2 className="text-3xl font-black text-gruvbox-fg-bright uppercase tracking-tighter">
@@ -96,7 +140,10 @@ function App() {
                     IP: {peer.ip} | PORT: {peer.port}
                   </p>
                 </div>
-                <button className="bg-gruvbox-green-bright hover:bg-gruvbox-fg-bright text-gruvbox-bg-hard font-black font-mono py-3 px-6 transition-colors uppercase tracking-widest">
+                <button 
+                  onClick={() => handleConnect(peer)}
+                  className="bg-gruvbox-green-bright hover:bg-gruvbox-fg-bright text-gruvbox-bg-hard font-black font-mono py-3 px-6 transition-colors uppercase tracking-widest"
+                >
                   Connect
                 </button>
               </div>
