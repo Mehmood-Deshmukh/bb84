@@ -20,6 +20,9 @@
   --color-gruvbox-aqua-bright: #8ec07c;
   --color-gruvbox-orange: #d65d0e;
   --color-gruvbox-orange-bright: #fe8019;
+  
+  --font-sans: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
 }
 
 body {

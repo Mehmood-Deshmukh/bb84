@@ -17,7 +17,7 @@ BUFFER_SIZE = 1 << 20     # 1 MB recv buffer
 # ─────────────────────────────────────────────
 # Quantum Parameters
 # ─────────────────────────────────────────────
-NUM_QUBITS = 512          # Total raw qubits sent per round
+NUM_QUBITS = 128        # Total raw qubits sent per round
 QBER_SAMPLE_FRACTION = 0.15   # Fraction of sifted bits sacrificed for QBER estimation
 QBER_THRESHOLD = 0.11         # Max tolerable QBER (11%) — theoretical BB84 limit
 

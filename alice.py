@@ -47,7 +47,7 @@ from bb84_protocol import (
     privacy_amplification,
 )
 
-from crypto_utils import derive_aes_key, encrypt_file
+from crypto_utils import derive_aes_key, encrypt_file, derive_chunk_nonce, encrypt_chunk
 
 
 class Colors:
@@ -122,6 +122,8 @@ def main():
         print(f"Usage: python alice.py <file_to_send> [--eve-mode]")
         sys.exit(1)
 
+    total_start = time.perf_counter()
+
     filepath = sys.argv[1]
     eve_mode = "--eve-mode" in sys.argv
     port = EVE_PORT if eve_mode else BOB_PORT
@@ -140,38 +142,48 @@ def main():
     section("Phase 1: Quantum Key Distribution (BB84)")
 
     status(f"Generating {NUM_QUBITS} random bits and bases...")
+    t_bits_start = time.perf_counter()
     alice_bits = generate_random_bits(NUM_QUBITS)
     alice_bases = generate_random_bases(NUM_QUBITS)
+    t_bits_end = time.perf_counter()
+    status(f"Generated in {t_bits_end - t_bits_start:.4f}s")
 
     status("Preparing qubits (encoding bits in quantum states)...")
-    t0 = time.time()
+    t0 = time.perf_counter()
     qasm_strings = prepare_qubits(alice_bits, alice_bases)
-    t1 = time.time()
-    success(f"Prepared {NUM_QUBITS} qubits in {t1-t0:.2f}s")
+    t1 = time.perf_counter()
+    success(f"Prepared {NUM_QUBITS} qubits in {t1-t0:.4f}s")
 
     # Qubits are transmitted noiselessly in this simplified protocol
     status("Sending qubits over quantum channel...")
+    t_send_start = time.perf_counter()
     send_json(sock, qasm_strings)
-    success("Qubits transmitted ⟩⟩⟩")
+    t_send_end = time.perf_counter()
+    success(f"Qubits transmitted ⟩⟩⟩ in {t_send_end - t_send_start:.4f}s")
 
 
     section("Phase 2: Classical Channel (Basis Exchange)")
 
     status("Waiting for Bob's measurement bases...")
+    t_basis_ex_start = time.perf_counter()
     bob_bases = recv_json(sock)
-    success(f"Received Bob's bases ({len(bob_bases)} entries)")
+    t_basis_ex_end = time.perf_counter()
+    success(f"Received Bob's bases ({len(bob_bases)} entries) in {t_basis_ex_end - t_basis_ex_start:.4f}s")
 
     section("Phase 3: Key Sifting & QBER Estimation")
 
+    t_sift_start = time.perf_counter()
     matching_indices = [i for i in range(NUM_QUBITS) if alice_bases[i] == bob_bases[i]]
     sifted_alice = [alice_bits[i] for i in matching_indices]
-    success(f"Sifted key: {len(sifted_alice)} bits (from {NUM_QUBITS} raw qubits)")
+    t_sift_end = time.perf_counter()
+    success(f"Sifted key: {len(sifted_alice)} bits in {t_sift_end - t_sift_start:.4f}s")
     status(f"Sift rate: {len(sifted_alice)/NUM_QUBITS*100:.1f}%")
 
     status("Sending matching indices to Bob...")
     send_json(sock, matching_indices)
 
     status("Estimating Quantum Bit Error Rate (QBER)...")
+    t_qber_start = time.perf_counter()
     import random
     from config import QBER_SAMPLE_FRACTION
     sample_size = max(1, int(len(sifted_alice) * QBER_SAMPLE_FRACTION))
@@ -186,6 +198,8 @@ def main():
     bob_sample_bits = bob_req["sample_bits"]
 
     qber, _, _, _ = estimate_qber(alice_sample_bits, bob_sample_bits, sample_fraction=1.0)
+    t_qber_end = time.perf_counter()
+    status(f"QBER estimated in {t_qber_end - t_qber_start:.4f}s")
 
     send_json(sock, {"qber": qber})
 
@@ -203,8 +217,10 @@ def main():
     remaining_alice = [sifted_alice[i] for i in range(len(sifted_alice)) if i not in sample_indices]
 
     status("Privacy amplification (SHA-256 universal hashing)...")
+    t_priv_start = time.perf_counter()
     salt, final_key = privacy_amplification(remaining_alice)
-    success(f"Final key: {len(final_key) * 8}-bit AES key derived")
+    t_priv_end = time.perf_counter()
+    success(f"Final key: {len(final_key) * 8}-bit AES key derived in {t_priv_end - t_priv_start:.4f}s")
     status(f"Key (hex): {final_key.hex()[:32]}...")
 
 
@@ -223,6 +239,8 @@ def main():
 
     status(f"File: {filename} ({file_size} bytes)")
     status(f"Streaming as {num_chunks} chunk(s) of {CHUNK_SIZE // 1024} KB")
+
+    t_file_start = time.perf_counter()
 
     file_meta = {
         "filename": filename,
@@ -245,15 +263,17 @@ def main():
                 pct = (i + 1) / num_chunks * 100
                 status(f"  Sent chunk {i+1}/{num_chunks} ({pct:.1f}%)")
 
-    success(f"Encrypted file '{filename}' streamed to Bob ({num_chunks} chunks)")
+    t_file_end = time.perf_counter()
+    success(f"Encrypted file '{filename}' streamed to Bob ({num_chunks} chunks) in {t_file_end - t_file_start:.4f}s")
 
+    total_end = time.perf_counter()
     section("Transfer Complete")
     success(f"File securely transferred using BB84 QKD + AES-256-GCM")
+    status(f"Total time elapsed: {total_end - total_start:.4f}s")
     status(f"Quantum key bits used: {NUM_QUBITS}")
     status(f"Sifted key length: {len(sifted_alice)} bits")
     status(f"Final key length: {len(final_key) * 8} bits")
     status(f"QBER: {qber*100:.2f}%")
-    status(f"Errors corrected: {errors_fixed}")
     status(f"File chunks: {num_chunks} × {CHUNK_SIZE // 1024} KB")
 
     sock.close()
