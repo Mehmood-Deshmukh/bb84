@@ -37,10 +37,6 @@ from bb84_protocol import (
 from crypto_utils import derive_aes_key, decrypt_file
 
 
-# ─────────────────────────────────────────────
-# Pretty Printing Utilities
-# ─────────────────────────────────────────────
-
 class Colors:
     HEADER = "\033[95m"
     BLUE = "\033[94m"
@@ -165,70 +161,54 @@ def main():
     status("Sending measurement bases to Alice...")
     send_json(conn, bob_bases)
 
-    status("Receiving Alice's bases...")
-    alice_bases = recv_json(conn)
-    success(f"Received Alice's bases ({len(alice_bases)} entries)")
+    status("Receiving matching indices from Alice...")
+    matching_indices = recv_json(conn)
+    
+    # ── Step 5: Basis Sifting ──
+    section("Phase 3: Key Sifting & QBER Estimation")
 
-    status("Receiving decoy-state intensity tags...")
-    intensity_tags = recv_json(conn)
-    success(f"Received intensity tags")
-
-    # ── Step 5: Send Bob's measured bits to Alice ──
-    status("Sending measured bits for sifting...")
-    send_json(conn, bob_bits)
-
-    # ── Step 6: Basis Sifting ──
-    section("Phase 3: Key Sifting & Security Verification")
-
-    # Bob doesn't know Alice's bits, but needs to sift his own
-    # We use dummy alice_bits for sifting structure (actual comparison done by Alice)
-    sifted_bob = []
-    sifted_tags = []
-    for i in range(len(bob_bases)):
-        if bob_bases[i] == alice_bases[i]:
-            sifted_bob.append(bob_bits[i])
-            sifted_tags.append(intensity_tags[i])
+    sifted_bob = [bob_bits[i] for i in matching_indices]
 
     success(f"Sifted key: {len(sifted_bob)} bits (from {len(qasm_strings)} raw qubits)")
     status(f"Sift rate: {len(sifted_bob)/len(qasm_strings)*100:.1f}%")
 
-    # ── Step 7: Receive QBER result from Alice ──
-    status("Waiting for QBER analysis result from Alice...")
-    qber_result = recv_json(conn)
-    qber = qber_result["qber"]
-    abort = qber_result["abort"]
-    sample_indices = set(qber_result["sample_indices"])
+    # ── Step 6: QBER Request from Alice ──
+    status("Waiting for QBER sample indices from Alice...")
+    qber_req = recv_json(conn)
+    sample_indices = qber_req["sample_indices"]
 
-    if abort:
-        error(f"QBER = {qber*100:.2f}% — EAVESDROPPER DETECTED!")
-        error("Alice has aborted the protocol.")
+    # Extract Bob's bits at those indices and send them back to Alice
+    sample_bits = [sifted_bob[i] for i in sample_indices]
+    
+    status("Sending sample bits back to Alice for calculation...")
+    send_json(conn, {"sample_bits": sample_bits})
+
+    # Wait for Alice's QBER calculation and verdict
+    status("Waiting for QBER result from Alice...")
+    result = recv_json(conn)
+    qber = result["qber"]
+
+    if qber >= QBER_THRESHOLD:
+        error(f"QBER = {qber*100:.2f}% (threshold: {QBER_THRESHOLD*100:.0f}%) — EAVESDROPPER DETECTED!")
         error("The quantum channel has been compromised.")
         conn.close()
         server.close()
-        return
+        import sys
+        sys.exit(1)
     else:
         success(f"QBER = {qber*100:.2f}% (threshold: {QBER_THRESHOLD*100:.0f}%) — Channel is SECURE")
 
-    # ── Step 8: Information Reconciliation ──
+    # ── Step 7: Information Reconciliation ──
     section("Phase 4: Key Distillation")
 
-    status("Receiving reconciliation data from Alice...")
-    reconciliation_data = recv_json(conn)
-    corrections = reconciliation_data["corrections"]
-    key_length = reconciliation_data["key_length"]
-
     # Bob removes sampled QBER bits to match Alice's remaining bits
-    status("Aligning keys and applying error correction...")
+    status("Aligning keys...")
     remaining_bob = [sifted_bob[i] for i in range(len(sifted_bob)) if i not in sample_indices]
-    
-    corrected_bob = list(remaining_bob[:key_length])
-    for idx in corrections:
-        corrected_bob[idx] ^= 1  # Flip error bits
-        
-    errors_fixed = len(corrections)
-    success(f"Reconciliation complete: {errors_fixed} errors corrected")
 
-    # ── Step 9: Privacy Amplification ──
+    # No reconciliation, we use remaining_bob directly
+    corrected_bob = remaining_bob
+
+    # ── Step 8: Privacy Amplification ──
     status("Receiving privacy amplification salt...")
     salt_data = recv_json(conn)
     salt = bytes.fromhex(salt_data["salt"])

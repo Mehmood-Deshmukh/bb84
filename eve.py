@@ -173,31 +173,32 @@ def main():
     bob_bases = json.loads(data.decode())
     eve_success(f"Bob's bases forwarded ({len(bob_bases)} entries)")
 
-    eve_status("Forwarding Alice's bases to Bob...")
+    eve_status("Forwarding matching indices to Bob...")
     data = forward_raw(alice_sock, bob_sock)
-    alice_bases = json.loads(data.decode())
-    eve_success(f"Alice's bases forwarded ({len(alice_bases)} entries)")
+    matching_indices = json.loads(data.decode())
+    eve_success(f"Matching indices forwarded ({len(matching_indices)} entries)")
 
-    eve_status("Forwarding decoy-state tags...")
+    eve_status("Forwarding sample indices to Bob...")
     forward_raw(alice_sock, bob_sock)
-    eve_success("Decoy tags forwarded")
+    eve_success("Sample indices forwarded")
 
-    eve_status("Forwarding Bob's measured bits to Alice...")
+    eve_status("Forwarding Bob's sample bits to Alice...")
     forward_raw(bob_sock, alice_sock)
-    eve_success("Bob's bits forwarded")
+    eve_success("Bob's sample bits forwarded")
 
     # ── Eve's Analysis ──
     section("Eve's Intelligence Gathering")
 
-    # Count matching bases between Eve and Alice
-    eve_alice_match = sum(1 for e, a in zip(eve_bases, alice_bases) if e == a)
-    eve_bob_match = sum(1 for e, b in zip(eve_bases, bob_bases) if e == b)
+    # Assuming Alice's bases were not intercepted directly since she only sends matching indices now
+    # We can infer Alice's bases at the matching indices to match Bob's bases.
+    eve_bob_match = 0
+    for idx in matching_indices:
+        if eve_bases[idx] == bob_bases[idx]:
+            eve_bob_match += 1
 
-    eve_success(f"Eve-Alice basis matches: {eve_alice_match}/{len(eve_bases)} "
-                f"({eve_alice_match/len(eve_bases)*100:.1f}%)")
-    eve_success(f"Eve-Bob basis matches:   {eve_bob_match}/{len(eve_bases)} "
-                f"({eve_bob_match/len(eve_bases)*100:.1f}%)")
-    eve_status("Eve knows ~25% of the sifted key bits (where all 3 bases align)")
+    eve_success(f"Eve's exact knowledge of final key bits: {eve_bob_match}/{len(matching_indices)} "
+                f"({(eve_bob_match/len(matching_indices))*100 if len(matching_indices)>0 else 0:.1f}%)")
+    eve_status("Eve knows ~50% of the sifted key bits (where all 3 bases align)")
     eve_status("But her interception has introduced ~25% QBER in the channel!")
 
     # ── Phase 3: Forward remaining protocol messages ──
@@ -207,7 +208,8 @@ def main():
     data = forward_raw(alice_sock, bob_sock)
     qber_result = json.loads(data.decode())
     qber = qber_result["qber"]
-    abort = qber_result["abort"]
+    from config import QBER_THRESHOLD
+    abort = qber >= QBER_THRESHOLD
 
     if abort:
         eve_status(f"QBER = {qber*100:.2f}% — Alice detected eavesdropping!")
