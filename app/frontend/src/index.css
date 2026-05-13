@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@theme {
+  --color-gruvbox-bg: #282828;
+  --color-gruvbox-bg-hard: #1d2021;
+  --color-gruvbox-bg-soft: #32302f;
+  --color-gruvbox-fg: #ebdbb2;
+  --color-gruvbox-fg-bright: #fbf1c7;
+  --color-gruvbox-red: #cc241d;
+  --color-gruvbox-red-bright: #fb4934;
+  --color-gruvbox-green: #98971a;
+  --color-gruvbox-green-bright: #b8bb26;
+  --color-gruvbox-yellow: #d79921;
+  --color-gruvbox-yellow-bright: #fabd2f;
+  --color-gruvbox-blue: #458588;
+  --color-gruvbox-blue-bright: #83a598;
+  --color-gruvbox-purple: #b16286;
+  --color-gruvbox-purple-bright: #d3869b;
+  --color-gruvbox-aqua: #689d6a;
+  --color-gruvbox-aqua-bright: #8ec07c;
+  --color-gruvbox-orange: #d65d0e;
+  --color-gruvbox-orange-bright: #fe8019;
+}
+
+body {
+  @apply bg-gruvbox-bg-hard text-gruvbox-fg min-h-screen antialiased;
+}
