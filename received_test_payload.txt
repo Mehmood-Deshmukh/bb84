@@ -1,0 +1,2 @@
+This is a dummy test payload for BB84 Decoy State testing.
+It contains some text.
