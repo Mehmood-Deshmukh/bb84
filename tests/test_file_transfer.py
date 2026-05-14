@@ -21,17 +21,12 @@ import tempfile
 import time
 import unittest
 
-# Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from crypto_utils import derive_aes_key, encrypt_chunk, decrypt_chunk, derive_chunk_nonce
 from config import CHUNK_SIZE, BUFFER_SIZE
 
 
-# ─────────────────────────────────────────────
-# Socket helpers (replicated from alice.py / bob.py
-# to avoid importing qiskit as a test dependency)
-# ─────────────────────────────────────────────
 
 def _recv_exact(sock, n: int) -> bytes:
     data = b""
@@ -121,10 +116,6 @@ def bob_receive_file(sock, output_dir, aes_key):
     sock.close()
     return output_path, bytes_written
 
-
-# ─────────────────────────────────────────────
-# Test Suite
-# ─────────────────────────────────────────────
 
 class TestFileTransfer(unittest.TestCase):
     """End-to-end chunked file transfer tests over TCP sockets."""
