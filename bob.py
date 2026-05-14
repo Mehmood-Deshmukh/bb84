@@ -29,10 +29,6 @@ from config import (
 from quantum_channel import measure_qubits
 from bb84_protocol import (
     generate_random_bases,
-    sift_keys,
-    analyze_decoy_states,
-    estimate_qber,
-    reconcile_keys,
     privacy_amplification,
 )
 from crypto_utils import derive_aes_key, decrypt_chunk, derive_chunk_nonce
@@ -131,6 +127,7 @@ def main():
     server.bind(("0.0.0.0", BOB_PORT))
     server.listen(1)
 
+    # STEP 1: Wait for alice's connection
     status(f"Listening on port {BOB_PORT}...")
     status("Waiting for Alice's connection (60s timeout)...")
     
@@ -143,10 +140,10 @@ def main():
         import sys
         sys.exit(1)
         
-    server.settimeout(None)  # Reset timeout for the connection
+    server.settimeout(None)
     success(f"Alice connected from {addr}")
 
-    # ── Step 2: Receive Qubits ──
+    # STEP 2: Receive Qubits
     section("Phase 1: Quantum Key Distribution (BB84)")
 
     status("Receiving qubits from quantum channel...")
@@ -155,7 +152,7 @@ def main():
     t1 = time.time()
     success(f"Received {len(qasm_strings)} qubits in {t1-t0:.2f}s")
 
-    # ── Step 3: Measure Qubits ──
+    # STEP 3: Measure Qubits
     status("Generating random measurement bases...")
     bob_bases = generate_random_bases(len(qasm_strings))
 
@@ -165,7 +162,7 @@ def main():
     t1 = time.time()
     success(f"Measured {len(bob_bits)} qubits in {t1-t0:.2f}s")
 
-    # ── Step 4: Classical Channel — Basis Exchange ──
+    # STEP 4: Exchange basis on the classical channel
     section("Phase 2: Classical Channel (Basis Exchange)")
 
     status("Sending measurement bases to Alice...")
@@ -174,7 +171,7 @@ def main():
     status("Receiving matching indices from Alice...")
     matching_indices = recv_json(conn)
     
-    # ── Step 5: Basis Sifting ──
+    # STEP 5: Sift the key
     section("Phase 3: Key Sifting & QBER Estimation")
 
     sifted_bob = [bob_bits[i] for i in matching_indices]
@@ -182,7 +179,7 @@ def main():
     success(f"Sifted key: {len(sifted_bob)} bits (from {len(qasm_strings)} raw qubits)")
     status(f"Sift rate: {len(sifted_bob)/len(qasm_strings)*100:.1f}%")
 
-    # ── Step 6: QBER Request from Alice ──
+    # STEP 6: QBER estimation
     status("Waiting for QBER sample indices from Alice...")
     qber_req = recv_json(conn)
     sample_indices = qber_req["sample_indices"]
@@ -208,17 +205,17 @@ def main():
     else:
         success(f"QBER = {qber*100:.2f}% (threshold: {QBER_THRESHOLD*100:.0f}%) — Channel is SECURE")
 
-    # ── Step 7: Information Reconciliation ──
+    # STEP 7: Information Reconciliation
     section("Phase 4: Key Distillation")
 
-    # Bob removes sampled QBER bits to match Alice's remaining bits
+    # Remove sampled QBER bits to match Alice's remaining bits
     status("Aligning keys...")
     remaining_bob = [sifted_bob[i] for i in range(len(sifted_bob)) if i not in sample_indices]
 
     # No reconciliation, we use remaining_bob directly
     corrected_bob = remaining_bob
 
-    # ── Step 8: Privacy Amplification ──
+    # STEP 8: Privacy Amplification
     status("Receiving privacy amplification salt...")
     salt_data = recv_json(conn)
     salt = bytes.fromhex(salt_data["salt"])
@@ -228,7 +225,7 @@ def main():
     success(f"Final key: {len(final_key) * 8}-bit AES key derived")
     status(f"Key (hex): {final_key.hex()[:32]}...")
 
-    # ── Step 10: Receive & Decrypt File (Chunked Streaming) ──
+    # STEP 10: Receive & Decrypt File (Chunked Streaming)
     section("Phase 5: Secure File Reception (Chunked Streaming)")
 
     aes_key = derive_aes_key(final_key)
@@ -270,7 +267,7 @@ def main():
         error(f"Decryption FAILED: {e}")
         error("Authentication tag mismatch — file may have been tampered with!")
 
-    # ── Done ──
+    # Done
     section("Transfer Complete")
     success("File securely received via BB84 QKD + AES-256-GCM")
     status(f"Quantum key bits used: {len(qasm_strings)}")
