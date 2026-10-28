@@ -1,6 +1,4 @@
 import { useMemo, useState } from 'react'
-import PixelBlast from './components/PixelBlast'
-import DecryptedText from './components/DecryptedText'
 import { createTransfer, renameNode, respondToTransfer } from './api/client'
 import { ACTIVE_STATUSES, TERMINAL_STATUSES } from './api/types'
 import { useHistory, useNode, usePeers, useTransfers } from './hooks/useNodeState'
@@ -76,27 +74,6 @@ function App() {
 
   return (
     <>
-      <div className="fixed top-[20%] inset-0 z-0 pointer-events-auto opacity-60">
-        <PixelBlast
-          variant="square"
-          pixelSize={4}
-          color="#fe8019"
-          patternScale={2}
-          patternDensity={0.15}
-          pixelSizeJitter={0}
-          enableRipples
-          rippleSpeed={0.4}
-          rippleThickness={0.12}
-          rippleIntensityScale={1.5}
-          liquid={false}
-          liquidStrength={0.12}
-          liquidRadius={1.2}
-          liquidWobbleSpeed={5}
-          speed={0.5}
-          edgeFade={0.25}
-          transparent
-        />
-      </div>
 
       {!isUsernameSet && (
         <div className="fixed inset-0 bg-black/92 z-[200] flex items-center justify-center p-4">
@@ -198,20 +175,13 @@ function App() {
         <div className="pointer-events-auto w-full max-w-3xl px-6 pt-16 pb-20 flex flex-col gap-8">
 
           <div className="mb-4">
-            {/* <div className="flex items-center gap-3 mb-5">
-              <div className="h-px flex-1 bg-gruvbox-orange-bright/40" />
-              <span className="font-mono text-xs text-gruvbox-orange-bright tracking-[0.4em] font-bold">
-                QUANTUM KEY DISTRIBUTION
-              </span>
-              <div className="h-px flex-1 bg-gruvbox-orange-bright/40" />
-            </div> */}
 
             <div className="leading-none mb-1">
               <div className="text-[clamp(2rem,6vw,4rem)] font-black text-gruvbox-fg-bright uppercase tracking-tighter leading-none">
-                <DecryptedText text="FILE TRANSFER" speed={50} maxIterations={18} />
+                FILE TRANSFER
               </div>
               <div className="text-[clamp(1.5rem,4vw,2.5rem)] font-black uppercase tracking-tighter leading-none" style={{ WebkitTextStroke: '1.5px var(--color-gruvbox-orange-bright)', color: 'transparent' }}>
-                <DecryptedText text="USING BB84 QKD" speed={55} maxIterations={22} />
+                USING BB84 QKD
               </div>
             </div>
 

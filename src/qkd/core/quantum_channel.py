@@ -3,9 +3,11 @@ Quantum Channel Simulation for BB84 QKD.
 
 Simulates:
   1. Qubit preparation (encoding random bits in random bases)
-  2. Depolarizing noise (random bit flips modeling fiber-optic loss)
-  3. Eavesdropper interception (intercept-resend attack)
-  4. Qubit measurement in a chosen basis
+  2. Eavesdropper interception (intercept-resend attack)
+  3. Qubit measurement in a chosen basis
+
+Each qubit travels as a one-qubit QASM 2 circuit. The channel itself is
+noiseless: nothing changes a qubit between Alice and Bob except Eve.
 
 Bases:
   '+' (rectilinear) — computational basis |0⟩, |1⟩
@@ -17,13 +19,11 @@ introducing detectable errors (~25% QBER).
 """
 
 from __future__ import annotations
-import random
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import Aer
 from qiskit.qasm2 import dumps
 
 from qkd.core.bb84_protocol import generate_random_bases
-from qkd.core.config import NOISE_PROBABILITY
 
 # Shared simulator backend
 _backend = Aer.get_backend("qasm_simulator")
@@ -58,34 +58,6 @@ def prepare_qubit(bit: int, basis: str) -> str:
 def prepare_qubits(bits: list[int], bases: list[str]) -> list[str]:
     """Prepare a batch of qubits from bits and bases."""
     return [prepare_qubit(b, basis) for b, basis in zip(bits, bases)]
-
-
-# ─────────────────────────────────────────────
-# Depolarizing Noise Channel
-# ─────────────────────────────────────────────
-
-def apply_depolarizing_noise(qasm_str: str, p: float = NOISE_PROBABILITY) -> str:
-    """
-    Simulate a depolarizing channel by randomly applying a bit-flip (X gate)
-    with probability `p`.
-
-    In a real fiber-optic channel, environmental noise causes random errors.
-    The depolarizing channel is the standard model:
-        ρ → (1−p)ρ + p/3 (XρX + YρY + ZρZ)
-
-    For simplicity, we model the dominant error (bit-flip):
-        With probability p, apply X gate.
-    """
-    if random.random() < p:
-        qc = QuantumCircuit.from_qasm_str(qasm_str)
-        qc.x(0)  # Bit-flip error
-        return dumps(qc)
-    return qasm_str
-
-
-def apply_channel_noise(qasm_strings: list[str], p: float = NOISE_PROBABILITY) -> list[str]:
-    """Apply apply_depolarizing_noise to every qubit."""
-    return [apply_depolarizing_noise(q, p) for q in qasm_strings]
 
 
 # ─────────────────────────────────────────────

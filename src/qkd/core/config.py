@@ -7,7 +7,6 @@ QKD_<NAME>, for example QKD_NUM_QUBITS=256. Values are read once, at import.
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from typing import Callable, TypeVar
@@ -23,10 +22,6 @@ def _env(name: str, default: T, cast: Callable[[str], T]) -> T:
         return cast(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid value for QKD_{name}: {raw!r}") from exc
-
-
-def _env_dict(name: str, default: dict[str, float]) -> dict[str, float]:
-    return _env(name, default, lambda raw: {str(k): float(v) for k, v in json.loads(raw).items()})
 
 
 # ─────────────────────────────────────────────
@@ -50,31 +45,6 @@ NODE_HOST = _env("NODE_HOST", "", str)  # address advertised to peers ("" = auto
 NUM_QUBITS = _env("NUM_QUBITS", 128, int)                       # Total raw qubits sent per round
 QBER_SAMPLE_FRACTION = _env("QBER_SAMPLE_FRACTION", 0.15, float)  # Fraction of sifted bits sacrificed for QBER estimation
 QBER_THRESHOLD = _env("QBER_THRESHOLD", 0.11, float)            # Max tolerable QBER (11%), theoretical BB84 limit
-
-# ─────────────────────────────────────────────
-# Decoy-State Protocol Parameters
-# ─────────────────────────────────────────────
-# Three intensity levels: signal, decoy, vacuum
-# Probabilities must sum to 1.0. Override with a JSON object.
-DECOY_INTENSITIES = _env_dict("DECOY_INTENSITIES", {
-    "signal": 0.8,    # μ — strong coherent pulses
-    "decoy":  0.1,    # ν — weak decoy pulses
-    "vacuum": 0.0,    # vacuum (zero photon)
-})
-DECOY_PROBABILITIES = _env_dict("DECOY_PROBABILITIES", {
-    "signal": 0.60,
-    "decoy":  0.30,
-    "vacuum": 0.10,
-})
-
-# Threshold for anomalous yield difference between signal and decoy
-# If |Y_signal - Y_decoy| > PNS_THRESHOLD, suspect PNS attack
-PNS_YIELD_THRESHOLD = _env("PNS_YIELD_THRESHOLD", 0.35, float)
-
-# ─────────────────────────────────────────────
-# Depolarizing Noise (Channel Simulation)
-# ─────────────────────────────────────────────
-NOISE_PROBABILITY = _env("NOISE_PROBABILITY", 0.02, float)  # Probability of random bit flip per qubit (2% baseline noise)
 
 # ─────────────────────────────────────────────
 # Privacy Amplification
