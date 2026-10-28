@@ -50,6 +50,7 @@ def _transmit_qubits(sock: socket.socket, n: int, reporter: Reporter) -> tuple[l
 
 
 def _sift(sock: socket.socket, bits: list[int], bases: list[str], reporter: Reporter) -> list[int]:
+    reporter.stage("sifting")
     reporter.section("Phase 2: Classical Channel (Basis Exchange)")
     reporter.info("Waiting for Bob's measurement bases...")
     bob_bases = recv_json(sock)
@@ -60,6 +61,7 @@ def _sift(sock: socket.socket, bits: list[int], bases: list[str], reporter: Repo
     sifted = [bits[i] for i in matching]
     reporter.success(f"Sifted key: {len(sifted)} bits")
     reporter.info(f"Sift rate: {len(sifted) / len(bits) * 100:.1f}%")
+    reporter.metrics(raw_qubits=len(bits), sifted_length=len(sifted))
 
     reporter.info("Sending matching indices to Bob...")
     send_json(sock, matching)
@@ -67,6 +69,7 @@ def _sift(sock: socket.socket, bits: list[int], bases: list[str], reporter: Repo
 
 
 def _estimate_qber(sock: socket.socket, sifted: list[int], params: ProtocolParams, reporter: Reporter) -> tuple[float, list[int]]:
+    reporter.stage("qber_estimation")
     reporter.info("Estimating Quantum Bit Error Rate (QBER)...")
     sample_indices = choose_sample_indices(len(sifted), params.qber_sample_fraction)
 
@@ -83,6 +86,7 @@ def _estimate_qber(sock: socket.socket, sifted: list[int], params: ProtocolParam
 
 def run_key_exchange(sock: socket.socket, params: ProtocolParams, reporter: Reporter) -> KeyExchangeResult:
     """Alice's side of BB84 up to and including privacy amplification."""
+    reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
     bits, bases = _transmit_qubits(sock, params.num_qubits, reporter)
     sifted = _sift(sock, bits, bases, reporter)
@@ -90,13 +94,15 @@ def run_key_exchange(sock: socket.socket, params: ProtocolParams, reporter: Repo
 
     result = dict(raw_qubits=params.num_qubits, sifted_length=len(sifted), sample_size=len(sample_indices),
                   qber=qber, threshold=params.qber_threshold)
-    if report_qber_verdict(qber, params.qber_threshold, reporter):
+    if report_qber_verdict(qber, params.qber_threshold, len(sample_indices), reporter):
         return KeyExchangeResult(key=None, **result)
 
+    reporter.stage("privacy_amplification")
     reporter.section("Phase 4: Key Distillation")
     reporter.info("Privacy amplification (SHA-256 universal hashing)...")
     salt, key = privacy_amplification(discard_indices(sifted, sample_indices))
     reporter.success(f"Final key: {len(key) * 8}-bit AES key derived")
+    reporter.metrics(key_bits=len(key) * 8)
     reporter.info(f"Key (hex): {key.hex()[:32]}...")
     send_json(sock, {"salt": salt.hex()})
     return KeyExchangeResult(key=key, **result)
@@ -114,12 +120,15 @@ def send_file(
     if kx.aborted:
         return kx
 
+    reporter.stage("file_transfer")
     reporter.section("Phase 5: Secure File Transfer (Chunked Streaming)")
     meta = describe_file(filepath, params.chunk_size)
     reporter.info(f"File: {meta.filename} ({meta.total_size} bytes)")
     reporter.info(f"Streaming as {meta.num_chunks} chunk(s) of {meta.chunk_size // 1024} KB")
+    reporter.progress(0, meta.num_chunks, 0, meta.total_size)
 
-    def on_progress(done: int, total: int, _sent: int) -> None:
+    def on_progress(done: int, total: int, sent: int) -> None:
+        reporter.progress(done, total, sent, meta.total_size)
         if done % 100 == 0 or done == total:
             reporter.info(f"  Sent chunk {done}/{total} ({done / total * 100:.1f}%)")
 

@@ -1,29 +1,50 @@
-import React, { useState, useEffect, useRef } from 'react'
+import { useMemo, useState } from 'react'
 import PixelBlast from './components/PixelBlast'
 import DecryptedText from './components/DecryptedText'
-
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
-const WS_BASE = API_BASE.replace(/^http/, 'ws')
+import { createTransfer, renameNode, respondToTransfer } from './api/client'
+import { ACTIVE_STATUSES, TERMINAL_STATUSES } from './api/types'
+import { useHistory, useNode, usePeers, useTransfers } from './hooks/useNodeState'
+import { useTransferEvents } from './hooks/useTransferEvents'
 
 function App() {
-  const [status, setStatus] = useState('CONNECTING...')
-  const [peers, setPeers] = useState([])
-  const [socket, setSocket] = useState(null)
+  const node = useNode()
+  const peers = usePeers().data ?? []
+  const transfers = useTransfers()
+  const history = useHistory().data ?? []
   const [selectedFile, setSelectedFile] = useState(null)
   const [toast, setToast] = useState(null)
-  const [logs, setLogs] = useState([])
-  const [incomingRequest, setIncomingRequest] = useState(null)
   const [username, setUsername] = useState(localStorage.getItem("qkd_username") || "")
   const [isUsernameSet, setIsUsernameSet] = useState(!!localStorage.getItem("qkd_username"))
-  const [transferProgress, setTransferProgress] = useState(null)
-  const [history, setHistory] = useState([])
-  const [isTransferActive, setIsTransferActive] = useState(false)
   const [isTerminalMinimized, setIsTerminalMinimized] = useState(false)
-  const isTransferringRef = useRef(false)
+
+  const allTransfers = useMemo(() => transfers.data ?? [], [transfers.data])
+  const incomingRequest = allTransfers.find(t => t.direction === 'incoming' && t.status === 'pending')
+  const activeTransfer = allTransfers.find(t => ACTIVE_STATUSES.has(t.status))
+    ?? allTransfers.find(t => t.status !== 'pending')
+  const events = useTransferEvents(activeTransfer?.id ?? null)
+  const logs = events.filter(e => e.type === 'log').map(e => e.payload.message)
+  const isTransferActive = !!activeTransfer && ACTIVE_STATUSES.has(activeTransfer.status)
+  const progress = activeTransfer?.progress
+  const transferProgress = progress && progress.num_chunks > 0 && !TERMINAL_STATUSES.has(activeTransfer.status)
+    ? (progress.chunks_done / progress.num_chunks) * 100
+    : null
 
   const showToast = (message, type = 'info') => {
     setToast({ message, type })
     setTimeout(() => setToast(null), 4000)
+  }
+
+  const saveUsername = async () => {
+    const name = username.trim()
+    if (!name) return
+    try {
+      await renameNode(name)
+      localStorage.setItem("qkd_username", name)
+      setIsUsernameSet(true)
+      showToast(`Node Initialized as [ ${name} ]`, 'success')
+    } catch (err) {
+      showToast(`Failed to set username: ${err.message}`, 'error')
+    }
   }
 
   const handleConnect = async (peer) => {
@@ -31,129 +52,27 @@ function App() {
       showToast("[ ERROR ] PLEASE SELECT A FILE TO TRANSMIT FIRST.", 'error')
       return
     }
-
-    const formData = new FormData()
-    formData.append("file", selectedFile)
-    formData.append("target_ip", peer.ip)
-    formData.append("target_port", peer.port)
-
-    setLogs([])
-
     try {
-      const response = await fetch(`${API_BASE}/api/transfer`, {
-        method: 'POST',
-        body: formData,
-      })
-      const data = await response.json()
-      if (data.status === 'ok') {
-        showToast("[ SUCCESS ] " + data.message, 'success')
-      } else {
-        showToast("[ ERROR ] " + data.detail, 'error')
-      }
+      await createTransfer(selectedFile, peer.id)
+      transfers.refresh()
+      showToast("[ SUCCESS ] Request sent to peer. Waiting for acceptance...", 'success')
     } catch (err) {
-      showToast("[ ERROR ] INITIATING TRANSFER: " + err.message, 'error')
+      showToast("[ ERROR ] " + err.message, 'error')
     }
   }
 
-  useEffect(() => {
-    let ws;
-    let reconnectTimeout;
-
-    const connectWebSocket = () => {
-      ws = new WebSocket(`${WS_BASE}/api/ws/status`)
-
-      ws.onopen = () => {
-        setStatus('CONNECTED TO BACKEND')
-      }
-
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data)
-        if (data.type === 'info') {
-          setStatus(`CONNECTED: ${data.message}`)
-        } else if (data.type === 'transfer_log') {
-          setLogs(prev => [...prev, data.message])
-          const progressMatch = data.message.match(/chunk \d+\/\d+ \(([\d.]+)%\)/)
-          if (progressMatch) {
-            setTransferProgress(parseFloat(progressMatch[1]))
-          } else if (data.message.includes("Transfer Process Complete") || data.message.includes("Receiver Process Complete")) {
-            setTransferProgress(100)
-            isTransferringRef.current = false
-            setIsTransferActive(false)
-            setTimeout(() => {
-              setTransferProgress(null)
-              setIsTerminalMinimized(true)
-            }, 3000)
-          } else if (data.message.includes("Starting transfer") || data.message.includes("Receiver launched") || data.message.includes("Starting Receiver")) {
-            setTransferProgress(0)
-            isTransferringRef.current = true
-            setIsTransferActive(true)
-            setIsTerminalMinimized(false)
-          }
-        } else if (data.type === 'incoming_request') {
-          if (isTransferringRef.current) {
-            fetch(`${API_BASE}/api/respond-transfer`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ transfer_id: data.transfer_id, accept: false })
-            }).catch(e => console.error(e))
-            return;
-          }
-          setIncomingRequest(data)
-        }
-      }
-
-      ws.onclose = () => {
-        setStatus('DISCONNECTED. RETRYING...')
-        reconnectTimeout = setTimeout(connectWebSocket, 2000)
-      }
-
-      setSocket(ws)
+  const respond = async (status) => {
+    try {
+      await respondToTransfer(incomingRequest.id, status)
+      transfers.refresh()
+      showToast(status === 'accepted' ? "Transmission Accepted. Receiver Initialized." : "Transmission Rejected.",
+        status === 'accepted' ? 'success' : 'error')
+    } catch (err) {
+      showToast("[ ERROR ] " + err.message, 'error')
     }
+  }
 
-    connectWebSocket()
-
-    const storedUser = localStorage.getItem("qkd_username")
-    if (storedUser) {
-      fetch(`${API_BASE}/api/set-username`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: storedUser })
-      }).catch(err => console.error(err))
-    }
-
-    const fetchPeers = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/peers`)
-        const data = await response.json()
-        setPeers(data.peers || [])
-      } catch (err) {
-        console.error("Failed to fetch peers", err)
-      }
-    }
-
-    const fetchHistory = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/history`)
-        const data = await response.json()
-        setHistory(data.history || [])
-      } catch (err) {}
-    }
-
-    fetchPeers()
-    fetchHistory()
-    const interval = setInterval(() => {
-      fetchPeers()
-      fetchHistory()
-    }, 2000)
-
-    return () => {
-      if (ws) ws.close()
-      clearTimeout(reconnectTimeout)
-      clearInterval(interval)
-    }
-  }, [])
-
-  const isOnline = status.startsWith('CONNECTED')
+  const isOnline = !node.error && !!node.data
 
   return (
     <>
@@ -197,34 +116,11 @@ function App() {
               placeholder="NODE IDENTIFIER"
               value={username}
               onChange={e => setUsername(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && username.trim() && (() => {
-                fetch(`${API_BASE}/api/set-username`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ username: username.trim() })
-                }).catch(() => { })
-                localStorage.setItem("qkd_username", username.trim())
-                setIsUsernameSet(true)
-                showToast(`Node Initialized as [ ${username.trim()} ]`, 'success')
-              })()}
+              onKeyDown={e => e.key === 'Enter' && saveUsername()}
               className="w-full bg-gruvbox-bg-hard border-2 border-gruvbox-fg p-4 text-gruvbox-fg-bright font-mono text-lg outline-none focus:border-gruvbox-green-bright mb-6 placeholder:text-gruvbox-fg/40 tracking-widest"
             />
             <button
-              onClick={async () => {
-                if (!username.trim()) return;
-                try {
-                  await fetch(`${API_BASE}/api/set-username`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: username.trim() })
-                  });
-                  localStorage.setItem("qkd_username", username.trim());
-                  setIsUsernameSet(true);
-                  showToast(`Node Initialized as [ ${username.trim()} ]`, 'success');
-                } catch (e) {
-                  showToast("Failed to set username", 'error');
-                }
-              }}
+              onClick={saveUsername}
               className="w-full bg-gruvbox-green-bright hover:bg-gruvbox-fg-bright text-gruvbox-bg-hard font-black font-mono py-3.5 uppercase tracking-widest transition-colors text-sm"
             >
               Initialize Node →
@@ -249,42 +145,26 @@ function App() {
             <div className="bg-gruvbox-bg-hard border-l-4 border-gruvbox-orange-bright p-5 font-mono text-sm text-gruvbox-fg mb-8 space-y-2">
               <div className="flex gap-3">
                 <span className="text-gruvbox-fg/60 w-20 shrink-0">SOURCE</span>
-                <span className="text-gruvbox-fg-bright font-bold">{incomingRequest.data.sender_ip}</span>
+                <span className="text-gruvbox-fg-bright font-bold">{incomingRequest.peer.name} ({incomingRequest.peer.host})</span>
               </div>
               <div className="flex gap-3">
                 <span className="text-gruvbox-fg/60 w-20 shrink-0">FILE</span>
-                <span className="text-gruvbox-fg-bright font-bold break-all">{incomingRequest.data.filename}</span>
+                <span className="text-gruvbox-fg-bright font-bold break-all">{incomingRequest.filename}</span>
               </div>
               <div className="flex gap-3">
                 <span className="text-gruvbox-fg/60 w-20 shrink-0">SIZE</span>
-                <span className="text-gruvbox-fg-bright font-bold">{(incomingRequest.data.file_size / 1024).toFixed(1)} KB</span>
+                <span className="text-gruvbox-fg-bright font-bold">{(incomingRequest.file_size / 1024).toFixed(1)} KB</span>
               </div>
             </div>
             <div className="flex gap-4">
               <button
-                onClick={async () => {
-                  await fetch(`${API_BASE}/api/respond-transfer`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ transfer_id: incomingRequest.transfer_id, accept: false })
-                  })
-                  setIncomingRequest(null)
-                  showToast("Transmission Rejected.", 'error')
-                }}
+                onClick={() => respond('rejected')}
                 className="flex-1 bg-transparent border-2 border-gruvbox-red-bright hover:bg-gruvbox-red-bright text-gruvbox-red-bright hover:text-gruvbox-bg-hard font-black font-mono py-3 uppercase tracking-widest transition-all text-sm"
               >
                 Reject
               </button>
               <button
-                onClick={async () => {
-                  await fetch(`${API_BASE}/api/respond-transfer`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ transfer_id: incomingRequest.transfer_id, accept: true })
-                  })
-                  setIncomingRequest(null)
-                  showToast("Transmission Accepted. Receiver Initialized.", 'success')
-                }}
+                onClick={() => respond('accepted')}
                 className="flex-1 bg-gruvbox-green-bright hover:bg-gruvbox-fg-bright text-gruvbox-bg-hard font-black font-mono py-3 uppercase tracking-widest transition-colors text-sm"
               >
                 Accept →
@@ -445,22 +325,22 @@ function App() {
                 </h2>
               </div>
               <div className="flex flex-col gap-3">
-                {history.map((item, idx) => (
-                  <div key={idx} className="flex flex-col sm:flex-row sm:items-center justify-between bg-gruvbox-bg-hard border-2 border-gruvbox-bg-soft p-4">
+                {history.map((item) => (
+                  <div key={item.id} className="flex flex-col sm:flex-row sm:items-center justify-between bg-gruvbox-bg-hard border-2 border-gruvbox-bg-soft p-4">
                     <div>
                       <div className="flex items-center gap-2 mb-1">
-                        <span className={`font-mono text-[10px] tracking-widest font-bold px-2 py-0.5 text-gruvbox-bg-hard ${item.type === 'SENT' ? 'bg-gruvbox-blue-bright' : 'bg-gruvbox-purple-bright'}`}>
-                          {item.type}
+                        <span className={`font-mono text-[10px] tracking-widest font-bold px-2 py-0.5 text-gruvbox-bg-hard ${item.direction === 'outgoing' ? 'bg-gruvbox-blue-bright' : 'bg-gruvbox-purple-bright'}`}>
+                          {item.direction === 'outgoing' ? 'SENT' : 'RECEIVED'}
                         </span>
                         <span className="font-mono text-[10px] text-gruvbox-fg/60 tracking-widest">
-                          {new Date(item.timestamp).toLocaleTimeString()}
+                          {new Date(item.finished_at).toLocaleTimeString()}
                         </span>
                       </div>
                       <h3 className="font-black text-gruvbox-fg-bright text-base break-words">
                         {item.filename}
                       </h3>
                       <p className="text-gruvbox-fg/70 font-mono text-xs mt-1">
-                        Peer: {item.peer_ip} | Status: <span className="text-gruvbox-green-bright">{item.status}</span>
+                        Peer: {item.peer_name} ({item.peer_host}) | Status: <span className="text-gruvbox-green-bright">{item.status}</span>
                       </p>
                     </div>
                   </div>
@@ -509,9 +389,9 @@ function App() {
               </div>
             ) : (
               <div className="flex flex-col gap-4">
-                {peers.map((peer, i) => (
+                {peers.map((peer) => (
                   <div
-                    key={i}
+                    key={peer.id}
                     className="flex flex-col sm:flex-row sm:items-center justify-between bg-gruvbox-bg-hard border-2 border-gruvbox-bg-soft hover:border-gruvbox-orange-bright transition-all p-5 group"
                   >
                     <div className="mb-4 sm:mb-0">
@@ -523,7 +403,7 @@ function App() {
                         {peer.name}
                       </h3>
                       <p className="text-gruvbox-fg/70 font-mono text-xs mt-1 tracking-widest">
-                        {peer.ip}:{peer.port}
+                        {peer.host}:{peer.port}
                       </p>
                     </div>
                     <button

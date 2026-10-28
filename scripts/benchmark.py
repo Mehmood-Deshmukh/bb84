@@ -3,7 +3,8 @@
 Run a benchmark sweep from experiments/configs/*.yaml.
 
 Each run starts real qkd.runner.bob / alice (and optionally eve) subprocesses on
-free localhost ports and records the wall time of Alice's process.
+free localhost ports, records the wall time of Alice's process, and reads the
+QBER, sifted key length, and outcome from Alice's JSON events.
 
     python scripts/benchmark.py experiments/configs/qubit_scaling.yaml
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import socket
 import subprocess
@@ -54,12 +56,29 @@ def run_once(payload: Path, work: Path, env: dict[str, str], eve: bool, timeout:
         time.sleep(1.5)
 
     start = time.perf_counter()
-    alice = subprocess.run(runner("alice", str(payload), "--host", "127.0.0.1", "--port", str(alice_port)),
+    alice = subprocess.run(runner("alice", str(payload), "--host", "127.0.0.1", "--port", str(alice_port), "--events", "json"),
                            env=env, capture_output=True, text=True, timeout=timeout)
     elapsed = time.perf_counter() - start
     exits = [p.wait(timeout=timeout) for p in procs]
-    return {"elapsed_s": round(elapsed, 4), "alice_exit": alice.returncode, "bob_exit": exits[0],
-            "aborted": int(alice.returncode != 0 and exits[0] != 0)}
+
+    # Alice's JSON events carry the measured values and the outcome.
+    metrics: dict = {}
+    outcome = "failed"
+    for line in alice.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "metrics":
+            metrics.update(event["payload"])
+        elif event.get("type") == "result":
+            outcome = event["payload"]["outcome"]
+    return {"elapsed_s": round(elapsed, 4), "outcome": outcome, "aborted": int(outcome == "aborted_qber"),
+            "qber": metrics.get("qber"), "sifted_length": metrics.get("sifted_length"),
+            "sample_size": metrics.get("sample_size"),
+            # Bob exits 0 only if every chunk authenticated. An undetected Eve leaves the keys
+            # different, so the transfer then fails at the GCM tag check instead.
+            "received": int(exits[0] == 0), "alice_exit": alice.returncode, "bob_exit": exits[0]}
 
 
 def main() -> int:

@@ -41,6 +41,8 @@ BUFFER_SIZE = _env("BUFFER_SIZE", 1 << 20, int)  # 1 MB recv buffer
 # HTTP port of the backend node. Peers are contacted on the port they advertise
 # over mDNS; this is the port this node listens on and advertises.
 NODE_PORT = _env("NODE_PORT", int(os.environ.get("PORT", 8000)), int)
+NODE_NAME = _env("NODE_NAME", "", str)  # display name advertised over mDNS ("" = generated)
+NODE_HOST = _env("NODE_HOST", "", str)  # address advertised to peers ("" = auto-detect)
 
 # ─────────────────────────────────────────────
 # Quantum Parameters

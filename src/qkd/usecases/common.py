@@ -23,8 +23,9 @@ class KeyExchangeResult:
         return self.key is None
 
 
-def report_qber_verdict(qber: float, threshold: float, reporter: Reporter) -> bool:
+def report_qber_verdict(qber: float, threshold: float, sample_size: int, reporter: Reporter) -> bool:
     """Report the QBER against the threshold. Returns True when the exchange must abort."""
+    reporter.metrics(qber=qber, qber_threshold=threshold, sample_size=sample_size)
     verdict = f"QBER = {qber*100:.2f}% (threshold: {threshold*100:.0f}%)"
     if qber_exceeds_threshold(qber, threshold):
         reporter.error(f"{verdict} — EAVESDROPPER DETECTED!")

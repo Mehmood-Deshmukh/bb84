@@ -44,6 +44,7 @@ def _measure(sock: socket.socket, reporter: Reporter) -> tuple[int, list[int], l
 
 
 def _sift(sock: socket.socket, raw: int, bits: list[int], bases: list[str], reporter: Reporter) -> list[int]:
+    reporter.stage("sifting")
     reporter.section("Phase 2: Classical Channel (Basis Exchange)")
     reporter.info("Sending measurement bases to Alice...")
     send_json(sock, bases)
@@ -55,10 +56,12 @@ def _sift(sock: socket.socket, raw: int, bits: list[int], bases: list[str], repo
     sifted = [bits[i] for i in matching]
     reporter.success(f"Sifted key: {len(sifted)} bits (from {raw} raw qubits)")
     reporter.info(f"Sift rate: {len(sifted) / raw * 100:.1f}%")
+    reporter.metrics(raw_qubits=raw, sifted_length=len(sifted))
     return sifted
 
 
 def _answer_qber_sample(sock: socket.socket, sifted: list[int], reporter: Reporter) -> tuple[float, list[int]]:
+    reporter.stage("qber_estimation")
     reporter.info("Waiting for QBER sample indices from Alice...")
     sample_indices = recv_json(sock)["sample_indices"]
 
@@ -71,6 +74,7 @@ def _answer_qber_sample(sock: socket.socket, sifted: list[int], reporter: Report
 
 def run_key_exchange(sock: socket.socket, params: ProtocolParams, reporter: Reporter) -> KeyExchangeResult:
     """Bob's side of BB84 up to and including privacy amplification."""
+    reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
     raw, bits, bases = _measure(sock, reporter)
     sifted = _sift(sock, raw, bits, bases, reporter)
@@ -78,9 +82,10 @@ def run_key_exchange(sock: socket.socket, params: ProtocolParams, reporter: Repo
 
     result = dict(raw_qubits=raw, sifted_length=len(sifted), sample_size=len(sample_indices),
                   qber=qber, threshold=params.qber_threshold)
-    if report_qber_verdict(qber, params.qber_threshold, reporter):
+    if report_qber_verdict(qber, params.qber_threshold, len(sample_indices), reporter):
         return KeyExchangeResult(key=None, **result)
 
+    reporter.stage("privacy_amplification")
     reporter.section("Phase 4: Key Distillation")
     # No reconciliation: the channel is noiseless, so the remaining bits already match Alice's.
     reporter.info("Aligning keys...")
@@ -91,6 +96,7 @@ def run_key_exchange(sock: socket.socket, params: ProtocolParams, reporter: Repo
     reporter.info("Privacy amplification (SHA-256 universal hashing)...")
     _, key = privacy_amplification(remaining, salt=salt)
     reporter.success(f"Final key: {len(key) * 8}-bit AES key derived")
+    reporter.metrics(key_bits=len(key) * 8)
     reporter.info(f"Key (hex): {key.hex()[:32]}...")
     return KeyExchangeResult(key=key, **result)
 
@@ -110,6 +116,7 @@ def receive_file(
     if kx.aborted:
         return ReceiveResult(kx)
 
+    reporter.stage("file_transfer")
     reporter.section("Phase 5: Secure File Reception (Chunked Streaming)")
     reporter.info("Receiving encrypted file metadata...")
     meta = receive_file_meta(sock)
@@ -118,8 +125,10 @@ def receive_file(
     os.makedirs(output_dir, exist_ok=True)
     output_path = received_path(output_dir, meta.filename)
     reporter.info(f"Receiving and decrypting {meta.num_chunks} chunks...")
+    reporter.progress(0, meta.num_chunks, 0, meta.total_size)
 
-    def on_progress(done: int, total: int, _written: int) -> None:
+    def on_progress(done: int, total: int, written: int) -> None:
+        reporter.progress(done, total, written, meta.total_size)
         if done % 100 == 0 or done == total:
             reporter.info(f"  Decrypted chunk {done}/{total} ({done / total * 100:.1f}%)")
 
