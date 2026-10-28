@@ -10,8 +10,11 @@ from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
 import os
 import uuid
 
+from qkd.core.config import BOB_PORT, OUTPUT_DIR
+
 SERVICE_TYPE = "_qkd._tcp.local."
 SERVICE_PORT = int(os.environ.get("PORT", 8000))
+HISTORY_FILE = os.environ.get("QKD_HISTORY_FILE", "history.json")
 NODE_ID = str(uuid.uuid4())[:4]
 NODE_NAME = f"QKD-Node-{socket.gethostname()}-{NODE_ID}"
 
@@ -116,7 +119,7 @@ app.add_middleware(
 def append_to_history(entry_type, filename, peer_ip, status):
     import json
     from datetime import datetime
-    history_file = os.path.join(os.path.dirname(__file__), "history.json")
+    history_file = HISTORY_FILE
     history = []
     if os.path.exists(history_file):
         try:
@@ -142,7 +145,7 @@ def append_to_history(entry_type, filename, peer_ip, status):
 @app.get("/api/history")
 def get_history():
     import json
-    history_file = os.path.join(os.path.dirname(__file__), "history.json")
+    history_file = HISTORY_FILE
     if os.path.exists(history_file):
         try:
             with open(history_file, "r") as f:
@@ -270,18 +273,13 @@ async def respond_transfer(data: dict):
     loop = asyncio.get_running_loop()
     
     if data["accept"]:
-        bob_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "bob.py")
-        root_venv_python = os.path.join(os.path.dirname(bob_path), ".venv", "bin", "python")
-        python_exe = root_venv_python if os.path.exists(root_venv_python) else sys.executable
-        
         def run_bob_bg():
             import re
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             asyncio.run_coroutine_threadsafe(broadcast_log("[*] Receiver launched, waiting for sender..."), loop)
             
             process = subprocess.Popen(
-                [python_exe, "-u", bob_path],
-                cwd=os.path.dirname(bob_path),
+                [sys.executable, "-u", "-m", "qkd.runner.bob", "--output-dir", os.path.abspath(OUTPUT_DIR)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -298,16 +296,8 @@ async def respond_transfer(data: dict):
 
         threading.Thread(target=run_bob_bg, daemon=True).start()
         
-        # Determine actual BOB_PORT from config
-        sys.path.append(os.path.dirname(bob_path))
         try:
-            import config
-            bob_port = config.BOB_PORT
-        except:
-            bob_port = 65432
-            
-        try:
-            req_data = json.dumps({"target_port": bob_port}).encode()
+            req_data = json.dumps({"target_port": BOB_PORT}).encode()
             req_obj = urllib.request.Request(f"http://{sender_ip}:8000/api/start-alice", data=req_data, headers={'Content-Type': 'application/json'})
             urllib.request.urlopen(req_obj)
         except Exception as e:
@@ -344,15 +334,10 @@ async def start_alice(data: dict):
 
     def run_alice_bg():
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        alice_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "alice.py")
-        root_venv_python = os.path.join(os.path.dirname(alice_path), ".venv", "bin", "python")
-        python_exe = root_venv_python if os.path.exists(root_venv_python) else sys.executable
-        
         asyncio.run_coroutine_threadsafe(broadcast_log(f"[*] Peer ACCEPTED! Starting transfer of {filename} to {target_ip}:{target_port}"), loop)
 
         process = subprocess.Popen(
-            [python_exe, "-u", alice_path, filepath, "--host", target_ip, "--port", str(target_port)],
-            cwd=os.path.dirname(alice_path),
+            [sys.executable, "-u", "-m", "qkd.runner.alice", filepath, "--host", target_ip, "--port", str(target_port)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -394,7 +379,3 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if websocket in active_connections:
             active_connections.remove(websocket)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=SERVICE_PORT, reload=True)

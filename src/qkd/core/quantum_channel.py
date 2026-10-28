@@ -22,7 +22,7 @@ from qiskit import QuantumCircuit, transpile
 from qiskit_aer import Aer
 from qiskit.qasm2 import dumps
 
-from config import NOISE_PROBABILITY
+from qkd.core.config import NOISE_PROBABILITY
 
 # Shared simulator backend
 _backend = Aer.get_backend("qasm_simulator")
@@ -113,7 +113,7 @@ def eve_intercept_resend(qasm_strings: list[str]) -> tuple[list[str], list[int],
     Returns:
         (modified_qasm_strings, eve_bits, eve_bases)
     """
-    from bb84_protocol import generate_random_bases
+    from qkd.core.bb84_protocol import generate_random_bases
     eve_bases = generate_random_bases(len(qasm_strings))
     eve_bits = []
     new_qasm = []

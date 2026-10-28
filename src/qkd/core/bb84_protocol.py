@@ -25,7 +25,7 @@ from typing import Optional
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import Aer
 
-from config import (
+from qkd.core.config import (
     NUM_QUBITS,
     QBER_SAMPLE_FRACTION,
     QBER_THRESHOLD,

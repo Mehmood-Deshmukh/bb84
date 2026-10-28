@@ -30,13 +30,13 @@ import socket
 import threading
 import time
 
-from config import (
+from qkd.core.config import (
     ALICE_HOST,
     BOB_PORT,
     EVE_PORT,
     BUFFER_SIZE,
 )
-from quantum_channel import eve_intercept_resend
+from qkd.core.quantum_channel import eve_intercept_resend
 
 
 # ─────────────────────────────────────────────
@@ -208,7 +208,7 @@ def main():
     data = forward_raw(alice_sock, bob_sock)
     qber_result = json.loads(data.decode())
     qber = qber_result["qber"]
-    from config import QBER_THRESHOLD
+    from qkd.core.config import QBER_THRESHOLD
     abort = qber >= QBER_THRESHOLD
 
     if abort:

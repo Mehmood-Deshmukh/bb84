@@ -1,4 +1,5 @@
 import subprocess
+import tempfile
 import time
 import os
 import sys
@@ -8,7 +9,8 @@ def create_payload(filepath, size_mb):
         f.write(os.urandom(size_mb * 1024 * 1024))
 
 def main():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    work_dir = tempfile.mkdtemp(prefix="qkd-bench-")
+    output_dir = os.path.join(work_dir, "received")
     
     payload_sizes = [1, 2, 5, 10]
     results = {}
@@ -20,17 +22,16 @@ def main():
     for size in payload_sizes:
         print(f"Testing with payload size = {size} MB...")
         
-        payload_path = os.path.join(project_root, "tests", f"{size}mb_payload.bin")
+        payload_path = os.path.join(work_dir, f"{size}mb_payload.bin")
         create_payload(payload_path, size)
         
         env = os.environ.copy()
         env["QKD_NUM_QUBITS"] = "128"
         
         # Start Bob
-        bob_path = os.path.join(project_root, "bob.py")
         bob_proc = subprocess.Popen(
-            [sys.executable, bob_path],
-            cwd=project_root,
+            [sys.executable, "-m", "qkd.runner.bob", "--output-dir", output_dir],
+            cwd=work_dir,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -40,12 +41,11 @@ def main():
         time.sleep(2.0) # Wait for Bob to bind
         
         # Start Alice
-        alice_path = os.path.join(project_root, "alice.py")
         start_time = time.time()
         
         alice_proc = subprocess.Popen(
-            [sys.executable, alice_path, payload_path],
-            cwd=project_root,
+            [sys.executable, "-m", "qkd.runner.alice", payload_path],
+            cwd=work_dir,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

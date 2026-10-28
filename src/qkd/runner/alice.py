@@ -25,7 +25,7 @@ import struct
 import socket
 import time
 
-from config import (
+from qkd.core.config import (
     ALICE_HOST,
     BOB_PORT,
     EVE_PORT,
@@ -35,9 +35,9 @@ from config import (
     CHUNK_SIZE,
 )
 
-from quantum_channel import prepare_qubits, apply_channel_noise
+from qkd.core.quantum_channel import prepare_qubits, apply_channel_noise
 
-from bb84_protocol import (
+from qkd.core.bb84_protocol import (
     generate_random_bits,
     generate_random_bases,
     tag_decoy_states,
@@ -48,7 +48,7 @@ from bb84_protocol import (
     privacy_amplification,
 )
 
-from crypto_utils import derive_aes_key, derive_chunk_nonce, encrypt_chunk
+from qkd.core.crypto_utils import derive_aes_key, derive_chunk_nonce, encrypt_chunk
 
 
 class Colors:
@@ -203,7 +203,7 @@ def main():
     status("Estimating Quantum Bit Error Rate (QBER)...")
     t_qber_start = time.perf_counter()
     import random
-    from config import QBER_SAMPLE_FRACTION
+    from qkd.core.config import QBER_SAMPLE_FRACTION
     sample_size = max(1, int(len(sifted_alice) * QBER_SAMPLE_FRACTION))
     sample_indices = sorted(random.sample(range(len(sifted_alice)), min(sample_size, len(sifted_alice))))
     alice_sample_bits = [sifted_alice[i] for i in sample_indices]

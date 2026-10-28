@@ -17,11 +17,8 @@ import math
 import time
 import unittest
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from crypto_utils import derive_aes_key, encrypt_chunk, decrypt_chunk, derive_chunk_nonce
-from config import CHUNK_SIZE
+from qkd.core.crypto_utils import derive_aes_key, encrypt_chunk, decrypt_chunk, derive_chunk_nonce
+from qkd.core.config import CHUNK_SIZE
 
 
 class TestChunkedCrypto(unittest.TestCase):

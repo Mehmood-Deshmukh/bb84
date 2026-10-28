@@ -1,3 +1,4 @@
+import os
 import time
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import Aer
@@ -37,8 +38,8 @@ def run_bundled_bb84(num_qubits: int, use_real_hardware: bool = False):
         
         service = QiskitRuntimeService(
             channel="ibm_cloud",
-            token="4OQrJuc3-AYFpnhCHKpyKpd5pdP7p75cCZFijxdVd-uk",
-            instance="crn:v1:bluemix:public:quantum-computing:us-east:a/3a5f9b303f6d4c10ba6e2db33827a207:195a243b-b5e4-4477-8022-027a8654b7fe::"
+            token=os.environ["QISKIT_IBM_TOKEN"],
+            instance=os.environ["QISKIT_IBM_INSTANCE"],
         )
         
         # Get the least busy physical backend

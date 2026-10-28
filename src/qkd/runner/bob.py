@@ -16,22 +16,25 @@ Usage:
 
 from __future__ import annotations
 import json
+import os
 import struct
 import socket
+import sys
 import time
 
-from config import (
+from qkd.core.config import (
     BOB_PORT,
     BUFFER_SIZE,
+    OUTPUT_DIR,
     NUM_QUBITS,
     QBER_THRESHOLD,
 )
-from quantum_channel import measure_qubits
-from bb84_protocol import (
+from qkd.core.quantum_channel import measure_qubits
+from qkd.core.bb84_protocol import (
     generate_random_bases,
     privacy_amplification,
 )
-from crypto_utils import derive_aes_key, decrypt_chunk, derive_chunk_nonce
+from qkd.core.crypto_utils import derive_aes_key, decrypt_chunk, derive_chunk_nonce
 
 
 class Colors:
@@ -122,13 +125,20 @@ def _recv_exact(sock, n: int) -> bytes:
 def main():
     banner()
 
+    port = BOB_PORT
+    output_dir = OUTPUT_DIR
+    if "--port" in sys.argv:
+        port = int(sys.argv[sys.argv.index("--port") + 1])
+    if "--output-dir" in sys.argv:
+        output_dir = sys.argv[sys.argv.index("--output-dir") + 1]
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", BOB_PORT))
+    server.bind(("0.0.0.0", port))
     server.listen(1)
 
     # STEP 1: Wait for alice's connection
-    status(f"Listening on port {BOB_PORT}...")
+    status(f"Listening on port {port}...")
     status("Waiting for Alice's connection (60s timeout)...")
     
     server.settimeout(60.0)
@@ -137,7 +147,6 @@ def main():
     except socket.timeout:
         error("Timed out waiting for Alice's connection.")
         server.close()
-        import sys
         sys.exit(1)
         
     server.settimeout(None)
@@ -200,7 +209,6 @@ def main():
         error("The quantum channel has been compromised.")
         conn.close()
         server.close()
-        import sys
         sys.exit(1)
     else:
         success(f"QBER = {qber*100:.2f}% (threshold: {QBER_THRESHOLD*100:.0f}%) — Channel is SECURE")
@@ -240,7 +248,8 @@ def main():
 
     status(f"File: {filename} ({total_size} bytes, {num_chunks} chunks of {chunk_size // 1024} KB)")
 
-    output_path = f"received_{filename}"
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"received_{filename}")
     status(f"Receiving and decrypting {num_chunks} chunks...")
 
     try:
