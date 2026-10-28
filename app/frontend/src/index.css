@@ -1,30 +1,108 @@
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
 @import "tailwindcss";
 
+/*
+  Palette: cool grey-green paper, ink, one teal accent for actions and work in
+  progress, red only for aborts and failures. Dark mode swaps the values, not the roles.
+*/
 @theme {
-  --color-gruvbox-bg: #282828;
-  --color-gruvbox-bg-hard: #1d2021;
-  --color-gruvbox-bg-soft: #32302f;
-  --color-gruvbox-fg: #ebdbb2;
-  --color-gruvbox-fg-bright: #fbf1c7;
-  --color-gruvbox-red: #cc241d;
-  --color-gruvbox-red-bright: #fb4934;
-  --color-gruvbox-green: #98971a;
-  --color-gruvbox-green-bright: #b8bb26;
-  --color-gruvbox-yellow: #d79921;
-  --color-gruvbox-yellow-bright: #fabd2f;
-  --color-gruvbox-blue: #458588;
-  --color-gruvbox-blue-bright: #83a598;
-  --color-gruvbox-purple: #b16286;
-  --color-gruvbox-purple-bright: #d3869b;
-  --color-gruvbox-aqua: #689d6a;
-  --color-gruvbox-aqua-bright: #8ec07c;
-  --color-gruvbox-orange: #d65d0e;
-  --color-gruvbox-orange-bright: #fe8019;
-  
-  --font-sans: "Space Grotesk", sans-serif;
-  --font-mono: "JetBrains Mono", monospace;
+  --color-paper: #edf0ee;
+  --color-surface: #f7f8f7;
+  --color-well: #e3e7e4;
+  --color-ink: #15191c;
+  --color-ink-2: #59626a;
+  --color-rule: #c7cdc9;
+  --color-accent: #0a6b66;
+  --color-on-accent: #ffffff;
+  --color-danger: #b42318;
+
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  /* Type scale: 12 / 14 / 16 / 20 / 28 */
+  --text-fine: 0.75rem;
+  --text-fine--line-height: 1.4;
+  --text-small: 0.875rem;
+  --text-small--line-height: 1.45;
+  --text-body: 1rem;
+  --text-body--line-height: 1.5;
+  --text-section: 1.25rem;
+  --text-section--line-height: 1.3;
+  --text-title: 1.75rem;
+  --text-title--line-height: 1.15;
 }
 
-body {
-  @apply bg-gruvbox-bg-hard text-gruvbox-fg min-h-screen antialiased;
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: #14181a;
+    --color-surface: #191e20;
+    --color-well: #0f1214;
+    --color-ink: #e3e8e5;
+    --color-ink-2: #9aa3a0;
+    --color-rule: #2e3538;
+    --color-accent: #4fb3ab;
+    --color-on-accent: #0f1214;
+    --color-danger: #f07466;
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: light dark;
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: rgb(10 107 102 / 0.15);
+    touch-action: manipulation;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  body {
+    background: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: 1.5;
+    font-feature-settings: "tnum" 1;
+    min-height: 100dvh;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  button,
+  [role="button"],
+  label[for] {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  dialog {
+    overscroll-behavior: contain;
+  }
+
+  dialog::backdrop {
+    background: rgb(15 18 20 / 0.55);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
 }

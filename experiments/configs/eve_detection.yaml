@@ -1,0 +1,9 @@
+# How often an intercept-resend Eve is caught, against the number of raw qubits.
+# Fewer qubits means a smaller QBER sample, so detection is less reliable.
+name: eve_detection
+sweep:
+  param: QKD_NUM_QUBITS
+  values: [8, 16, 32, 64, 128]
+payload_mb: 0.001
+repeats: 10
+eve: true

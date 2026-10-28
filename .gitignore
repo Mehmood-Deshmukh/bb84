@@ -1,4 +1,17 @@
-./.venv
+# Python
+.venv/
 __pycache__/
-.venv
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Runtime output
+received/
+history.json
+experiments/results/
+experiments/figures/
+
+# Archives
 **/*.zip
