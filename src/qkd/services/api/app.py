@@ -10,11 +10,10 @@ from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
 import os
 import uuid
 
-from qkd.core.config import BOB_PORT, OUTPUT_DIR
+from qkd.core.config import BOB_PORT, HISTORY_FILE, NODE_PORT, OUTPUT_DIR
 
 SERVICE_TYPE = "_qkd._tcp.local."
-SERVICE_PORT = int(os.environ.get("PORT", 8000))
-HISTORY_FILE = os.environ.get("QKD_HISTORY_FILE", "history.json")
+SERVICE_PORT = NODE_PORT
 NODE_ID = str(uuid.uuid4())[:4]
 NODE_NAME = f"QKD-Node-{socket.gethostname()}-{NODE_ID}"
 
@@ -228,12 +227,13 @@ async def initiate_transfer(
     data = json.dumps({
         "filename": file.filename,
         "file_size": os.path.getsize(filepath),
-        "sender_ip": my_ip
+        "sender_ip": my_ip,
+        "sender_port": SERVICE_PORT,
     }).encode()
     
     def send_req():
         try:
-            req = urllib.request.Request(f"http://{target_ip}:8000/api/request-transfer", data=data, headers={'Content-Type': 'application/json'})
+            req = urllib.request.Request(f"http://{target_ip}:{target_port}/api/request-transfer", data=data, headers={'Content-Type': 'application/json'})
             urllib.request.urlopen(req, timeout=5)
         except Exception as e:
             pass
@@ -269,6 +269,7 @@ async def respond_transfer(data: dict):
         return {"status": "error", "message": "Invalid transfer ID"}
     req = pending_requests.pop(transfer_id)
     sender_ip = req["sender_ip"]
+    sender_port = req.get("sender_port", SERVICE_PORT)
     
     loop = asyncio.get_running_loop()
     
@@ -298,14 +299,14 @@ async def respond_transfer(data: dict):
         
         try:
             req_data = json.dumps({"target_port": BOB_PORT}).encode()
-            req_obj = urllib.request.Request(f"http://{sender_ip}:8000/api/start-alice", data=req_data, headers={'Content-Type': 'application/json'})
+            req_obj = urllib.request.Request(f"http://{sender_ip}:{sender_port}/api/start-alice", data=req_data, headers={'Content-Type': 'application/json'})
             urllib.request.urlopen(req_obj)
         except Exception as e:
             print(f"[!] HTTP Error notifying Alice to start: {e}")
         return {"status": "accepted"}
     else:
         try:
-            req_obj = urllib.request.Request(f"http://{sender_ip}:8000/api/reject-alice", data=b"{}", headers={'Content-Type': 'application/json'})
+            req_obj = urllib.request.Request(f"http://{sender_ip}:{sender_port}/api/reject-alice", data=b"{}", headers={'Content-Type': 'application/json'})
             urllib.request.urlopen(req_obj)
         except:
             pass

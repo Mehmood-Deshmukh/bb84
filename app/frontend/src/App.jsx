@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef } from 'react'
 import PixelBlast from './components/PixelBlast'
 import DecryptedText from './components/DecryptedText'
 
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const WS_BASE = API_BASE.replace(/^http/, 'ws')
+
 function App() {
   const [status, setStatus] = useState('CONNECTING...')
   const [peers, setPeers] = useState([])
@@ -37,7 +40,7 @@ function App() {
     setLogs([])
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/transfer', {
+      const response = await fetch(`${API_BASE}/api/transfer`, {
         method: 'POST',
         body: formData,
       })
@@ -57,7 +60,7 @@ function App() {
     let reconnectTimeout;
 
     const connectWebSocket = () => {
-      ws = new WebSocket('ws://127.0.0.1:8000/api/ws/status')
+      ws = new WebSocket(`${WS_BASE}/api/ws/status`)
 
       ws.onopen = () => {
         setStatus('CONNECTED TO BACKEND')
@@ -88,7 +91,7 @@ function App() {
           }
         } else if (data.type === 'incoming_request') {
           if (isTransferringRef.current) {
-            fetch('http://127.0.0.1:8000/api/respond-transfer', {
+            fetch(`${API_BASE}/api/respond-transfer`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ transfer_id: data.transfer_id, accept: false })
@@ -111,7 +114,7 @@ function App() {
 
     const storedUser = localStorage.getItem("qkd_username")
     if (storedUser) {
-      fetch('http://127.0.0.1:8000/api/set-username', {
+      fetch(`${API_BASE}/api/set-username`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: storedUser })
@@ -120,7 +123,7 @@ function App() {
 
     const fetchPeers = async () => {
       try {
-        const response = await fetch('http://127.0.0.1:8000/api/peers')
+        const response = await fetch(`${API_BASE}/api/peers`)
         const data = await response.json()
         setPeers(data.peers || [])
       } catch (err) {
@@ -130,7 +133,7 @@ function App() {
 
     const fetchHistory = async () => {
       try {
-        const response = await fetch('http://127.0.0.1:8000/api/history')
+        const response = await fetch(`${API_BASE}/api/history`)
         const data = await response.json()
         setHistory(data.history || [])
       } catch (err) {}
@@ -195,7 +198,7 @@ function App() {
               value={username}
               onChange={e => setUsername(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && username.trim() && (() => {
-                fetch('http://127.0.0.1:8000/api/set-username', {
+                fetch(`${API_BASE}/api/set-username`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ username: username.trim() })
@@ -210,7 +213,7 @@ function App() {
               onClick={async () => {
                 if (!username.trim()) return;
                 try {
-                  await fetch('http://127.0.0.1:8000/api/set-username', {
+                  await fetch(`${API_BASE}/api/set-username`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username: username.trim() })
@@ -260,7 +263,7 @@ function App() {
             <div className="flex gap-4">
               <button
                 onClick={async () => {
-                  await fetch('http://127.0.0.1:8000/api/respond-transfer', {
+                  await fetch(`${API_BASE}/api/respond-transfer`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ transfer_id: incomingRequest.transfer_id, accept: false })
@@ -274,7 +277,7 @@ function App() {
               </button>
               <button
                 onClick={async () => {
-                  await fetch('http://127.0.0.1:8000/api/respond-transfer', {
+                  await fetch(`${API_BASE}/api/respond-transfer`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ transfer_id: incomingRequest.transfer_id, accept: true })

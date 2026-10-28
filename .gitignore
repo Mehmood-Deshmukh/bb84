@@ -10,6 +10,8 @@ dist/
 # Runtime output
 received/
 history.json
+experiments/results/
+experiments/figures/
 
 # Archives
 **/*.zip

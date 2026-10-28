@@ -203,46 +203,52 @@ def analyze_decoy_states(
     )
 
 
-def estimate_qber(
-    sifted_alice: list[int],
-    sifted_bob: list[int],
-    sample_fraction: float = QBER_SAMPLE_FRACTION,
-) -> tuple[float, list[int], list[int]]:
-    """
-    Quantum Bit Error Rate (QBER) estimation.
+def matching_basis_indices(alice_bases: list[str], bob_bases: list[str]) -> list[int]:
+    """Indices where Alice and Bob chose the same basis (basis sifting, ~50% kept)."""
+    return [i for i, (a, b) in enumerate(zip(alice_bases, bob_bases)) if a == b]
 
-    Alice and Bob sacrifice a random subset of their sifted bits
-    to estimate the error rate. These bits are revealed over the
-    classical channel and can no longer be used for the key.
+
+def choose_sample_indices(n: int, sample_fraction: float = QBER_SAMPLE_FRACTION) -> list[int]:
+    """
+    Pick the sifted positions that Alice and Bob reveal to estimate the QBER.
+
+    These bits are disclosed over the classical channel and are removed from
+    the key afterwards.
+    """
+    sample_size = max(1, int(n * sample_fraction))
+    return sorted(random.sample(range(n), min(sample_size, n)))
+
+
+def compute_qber(alice_sample: list[int], bob_sample: list[int]) -> float:
+    """
+    Quantum Bit Error Rate over the revealed sample.
 
     QBER Interpretation:
       - QBER ≈ 0%:   No eavesdropper, minimal channel noise
       - QBER < 11%:   Safe — errors from channel noise only
       - QBER ≈ 25%:   Intercept-resend attack detected (Eve)
       - QBER ≈ 50%:   Fully random — complete interception
+    """
+    if not alice_sample:
+        return 0.0
+    errors = sum(1 for a, b in zip(alice_sample, bob_sample) if a != b)
+    return errors / len(alice_sample)
+
+
+def qber_exceeds_threshold(qber: float, threshold: float = QBER_THRESHOLD) -> bool:
+    """
+    True when the key exchange must abort.
 
     The 11% threshold comes from the Shor-Preskill security proof:
     BB84 can distill a secure key if and only if QBER < 11%.
-
-    Returns:
-        (qber, remaining_alice_bits, remaining_bob_bits, sample_indices_list)
     """
-    n = len(sifted_alice)
-    sample_size = max(1, int(n * sample_fraction))
+    return qber >= threshold
 
-    sample_indices = set(random.sample(range(n), min(sample_size, n)))
 
-    errors = 0
-    for i in sample_indices:
-        if sifted_alice[i] != sifted_bob[i]:
-            errors += 1
-
-    qber = errors / len(sample_indices) if sample_indices else 0.0
-
-    remaining_alice = [sifted_alice[i] for i in range(n) if i not in sample_indices]
-    remaining_bob = [sifted_bob[i] for i in range(n) if i not in sample_indices]
-
-    return qber, remaining_alice, remaining_bob, sorted(sample_indices)
+def discard_indices(bits: list[int], indices: list[int]) -> list[int]:
+    """Remove the revealed sample positions from the sifted key."""
+    drop = set(indices)
+    return [b for i, b in enumerate(bits) if i not in drop]
 
 
 # ─────────────────────────────────────────────
@@ -313,7 +319,7 @@ def privacy_amplification(
     key_bits: list[int],
     target_bits: int = FINAL_KEY_BITS,
     salt: Optional[bytes] = None,
-) -> bytes:
+) -> tuple[bytes, bytes]:
     """
     Privacy amplification via universal hashing.
 
@@ -334,7 +340,7 @@ def privacy_amplification(
     choice from a universal family).
 
     Returns:
-        A `target_bits // 8` byte key.
+        (salt, key) where key is `target_bits // 8` bytes.
     """
     key_bytes = bits_to_bytes(key_bits)
 

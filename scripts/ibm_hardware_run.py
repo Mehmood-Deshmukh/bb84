@@ -1,3 +1,13 @@
+"""
+Run a bundled single-circuit BB84-style measurement on the Aer simulator or IBM Quantum hardware.
+
+    python scripts/ibm_hardware_run.py               # local Aer simulator
+    python scripts/ibm_hardware_run.py --hardware    # IBM Quantum (needs QISKIT_IBM_TOKEN, QISKIT_IBM_INSTANCE)
+
+Needs the `hardware` extra (qiskit-ibm-runtime). --hardware submits jobs to the IBM cloud queue.
+"""
+
+import argparse
 import os
 import time
 from qiskit import QuantumCircuit, transpile
@@ -5,7 +15,7 @@ from qiskit_aer import Aer
 from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
-def run_bundled_bb84(num_qubits: int, use_real_hardware: bool = False):
+def run_bundled_bb84(num_qubits: int, use_real_hardware: bool = False) -> None:
     print(f"\n--- Running Bundled BB84 Test for {num_qubits} Qubits ---")
     
     # 1. Create ONE single circuit for all qubits
@@ -66,6 +76,10 @@ def run_bundled_bb84(num_qubits: int, use_real_hardware: bool = False):
             print("Job failed or was cancelled.")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Bundled BB84 circuit on Aer or IBM hardware.")
+    parser.add_argument("--hardware", action="store_true", help="Submit to IBM Quantum hardware instead of Aer")
+    parser.add_argument("--sizes", type=int, nargs="+", default=[8, 16, 24], help="Qubit counts to run")
+    args = parser.parse_args()
     # Local Aer simulator usually caps at 30 qubits without advanced config
-    for size in [8, 16, 24]:
-        run_bundled_bb84(size, use_real_hardware=True)
+    for size in args.sizes:
+        run_bundled_bb84(size, use_real_hardware=args.hardware)

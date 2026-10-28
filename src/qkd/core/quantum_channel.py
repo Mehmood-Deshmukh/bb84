@@ -22,6 +22,7 @@ from qiskit import QuantumCircuit, transpile
 from qiskit_aer import Aer
 from qiskit.qasm2 import dumps
 
+from qkd.core.bb84_protocol import generate_random_bases
 from qkd.core.config import NOISE_PROBABILITY
 
 # Shared simulator backend
@@ -83,6 +84,7 @@ def apply_depolarizing_noise(qasm_str: str, p: float = NOISE_PROBABILITY) -> str
 
 
 def apply_channel_noise(qasm_strings: list[str], p: float = NOISE_PROBABILITY) -> list[str]:
+    """Apply apply_depolarizing_noise to every qubit."""
     return [apply_depolarizing_noise(q, p) for q in qasm_strings]
 
 
@@ -113,7 +115,6 @@ def eve_intercept_resend(qasm_strings: list[str]) -> tuple[list[str], list[int],
     Returns:
         (modified_qasm_strings, eve_bits, eve_bases)
     """
-    from qkd.core.bb84_protocol import generate_random_bases
     eve_bases = generate_random_bases(len(qasm_strings))
     eve_bits = []
     new_qasm = []

@@ -1,0 +1,35 @@
+# Plot definitions for scripts/plot_figures.py.
+# Each figure reads experiments/results/<source>.csv (written by scripts/benchmark.py)
+# and writes experiments/figures/<id>.png. Rows are averaged per x value.
+figures:
+  - id: qubit_scaling_time
+    source: qubit_scaling
+    x: value
+    y: elapsed_s
+    xlabel: Raw qubits
+    ylabel: Transfer time (s)
+    title: Transfer time vs. qubit count (1 MB payload)
+
+  - id: payload_scaling_time
+    source: payload_scaling
+    x: value
+    y: elapsed_s
+    xlabel: Payload (MB)
+    ylabel: Transfer time (s)
+    title: Transfer time vs. payload size (128 qubits)
+
+  - id: eve_detection_rate
+    source: eve_detection
+    x: value
+    y: aborted
+    xlabel: Raw qubits
+    ylabel: Fraction of runs aborted
+    title: Intercept-resend detection rate
+
+  - id: qber_threshold_abort_rate
+    source: qber_threshold
+    x: value
+    y: aborted
+    xlabel: QBER threshold
+    ylabel: Fraction of runs aborted
+    title: Abort rate under Eve vs. QBER threshold
