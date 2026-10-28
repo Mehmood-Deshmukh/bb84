@@ -32,6 +32,7 @@ def _measure(sock: socket.socket, reporter: Reporter) -> tuple[int, list[int], l
     reporter.info("Receiving qubits from quantum channel...")
     qasm_strings = recv_json(sock)
     reporter.success(f"Received {len(qasm_strings)} qubits")
+    reporter.metrics(raw_qubits=len(qasm_strings))
 
     reporter.info("Generating random measurement bases...")
     bases = generate_random_bases(len(qasm_strings))

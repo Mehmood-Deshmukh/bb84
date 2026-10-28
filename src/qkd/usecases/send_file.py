@@ -31,6 +31,7 @@ from qkd.usecases.common import KeyExchangeResult, report_qber_verdict, report_s
 
 
 def _transmit_qubits(sock: socket.socket, n: int, reporter: Reporter) -> tuple[list[int], list[str]]:
+    reporter.metrics(raw_qubits=n)
     reporter.info(f"Generating {n} random bits and bases...")
     t0 = time.perf_counter()
     bits = generate_random_bits(n)
