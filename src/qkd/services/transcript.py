@@ -34,6 +34,9 @@ class TranscriptChannel:
         direction byte (1B) || big-endian length (4B) || canonical JSON payload
     where direction byte is 0x00 for messages sent by Alice and 0x01 for messages
     sent by Bob.
+
+    bytes_sent and bytes_received count framed bytes (length prefix + payload) of
+    every message, tracked or not.
     """
 
     def __init__(self, sock: socket.socket, role: str) -> None:
@@ -43,17 +46,19 @@ class TranscriptChannel:
         self.sock = sock
         self.role = role_normalized
         self._hasher = hashlib.sha256()
+        self.bytes_sent = 0
+        self.bytes_received = 0
 
     def send_json(self, data: Any) -> None:
         """Send a JSON message and record it in the transcript hash."""
         payload = _canonical_json(data)
         dir_byte = _DIR_ALICE if self.role == "alice" else _DIR_BOB
         self._hasher.update(dir_byte + _LENGTH.pack(len(payload)) + payload)
-        wire.send_json(self.sock, data)
+        self._send(data)
 
     def recv_json(self) -> Any:
         """Receive a JSON message and record it in the transcript hash."""
-        data = wire.recv_json(self.sock)
+        data = self._recv()
         payload = _canonical_json(data)
         # Sender was the peer
         dir_byte = _DIR_BOB if self.role == "alice" else _DIR_ALICE
@@ -62,11 +67,21 @@ class TranscriptChannel:
 
     def send_untracked(self, data: Any) -> None:
         """Send a message without recording it in the transcript (e.g., qubits or finished)."""
-        wire.send_json(self.sock, data)
+        self._send(data)
 
     def recv_untracked(self) -> Any:
         """Receive an untracked message without recording it in the transcript."""
-        return wire.recv_json(self.sock)
+        return self._recv()
+
+    def _send(self, data: Any) -> None:
+        payload = wire.encode_json(data)
+        wire.send_bytes(self.sock, payload)
+        self.bytes_sent += _LENGTH.size + len(payload)
+
+    def _recv(self) -> Any:
+        payload = wire.recv_bytes(self.sock)
+        self.bytes_received += _LENGTH.size + len(payload)
+        return wire.decode_json(payload)
 
     def digest(self) -> bytes:
         """

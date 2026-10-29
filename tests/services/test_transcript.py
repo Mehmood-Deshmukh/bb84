@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import hashlib
+import json
 import socket
 import struct
 
@@ -171,3 +172,25 @@ def test_known_answer_digest(socket_pair: tuple[socket.socket, socket.socket]) -
 
     expected = hashlib.sha256(b"\x00" + struct.pack(">I", len(p)) + p).digest()
     assert alice.digest() == bob.digest() == expected
+
+
+def test_byte_counters_count_framed_bytes(socket_pair: tuple[socket.socket, socket.socket]) -> None:
+    sock_a, sock_b = socket_pair
+    alice = TranscriptChannel(sock_a, "alice")
+    bob = TranscriptChannel(sock_b, "bob")
+
+    tracked = {"hello": {"v": 1, "mode": "none"}}
+    untracked = ["OPENQASM 2.0;"]
+    reply = {"finished": "c2ln"}
+    alice.send_json(tracked)
+    bob.recv_json()
+    alice.send_untracked(untracked)
+    bob.recv_untracked()
+    bob.send_untracked(reply)
+    alice.recv_untracked()
+
+    # Each frame is a 4-byte length prefix plus the JSON payload exactly as sent
+    framed = lambda m: 4 + len(json.dumps(m).encode())  # noqa: E731
+    sent_by_alice = framed(tracked) + framed(untracked)
+    assert alice.bytes_sent == bob.bytes_received == sent_by_alice
+    assert bob.bytes_sent == alice.bytes_received == framed(reply)
