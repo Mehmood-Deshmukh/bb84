@@ -71,8 +71,9 @@ def test_mitm_auth_off(parallel, make_file, same_file, tmp_path: Path) -> None:
     assert mitm.relayed is True
     assert mitm.plaintext_sha256 == _sha256(src)
     assert mitm.plaintext_bytes == 100_000
-    # Bob's copy is byte-identical; its name is re-prefixed because the file passes
-    # through a receive then a send, so compare at the path Bob actually wrote.
+    # Mallory relays under Alice's original filename, so Bob stores received_payload.bin
+    # (not received_received_payload.bin) with byte-identical contents.
+    assert Path(bob_res.output_path).name == "received_payload.bin"
     assert same_file(src, Path(bob_res.output_path))
 
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import shutil
 import socket
 import tempfile
@@ -125,6 +126,9 @@ def _own_key(
             plaintext_bytes = len(data)
             reporter.success(f"Recovered {plaintext_bytes} bytes of plaintext (sha256 {plaintext_sha256[:16]}...)")
 
+            # Relay under Alice's original filename so Bob stores received_<name>,
+            # not received_received_<name>: strip the "received_" that received_path added.
+            path = _restore_name(path)
             reporter.info("Leg 2: sending to Bob, posing as Alice")
             try:
                 alice_flow.send_file(bob_sock, path, NullReporter(), params, _context(mode, identity))
@@ -161,7 +165,15 @@ def _relay_hello(
 
         # Be Bob through qubits, sifting, QBER, and salt, against Alice herself.
         reporter.info("Running Bob's key exchange against Alice")
-        bob_flow.run_key_exchange(channel, params, NullReporter())
+        kx = bob_flow.run_key_exchange(channel, params, NullReporter())
+        if kx.aborted:
+            # Alice detected the (nonexistent) eavesdropper and will send no salt; there is
+            # nothing to sign over. Record the QBER reason, as _own_key does, and stop.
+            reporter.warning("Alice aborted on QBER; no finished to forge")
+            return MitmResult(
+                "relay_hello", mode, None, 0,
+                f"qber {kx.qber:.2%} >= threshold {kx.threshold:.0%}", None, False,
+            )
         transcript_hash = channel.digest()
 
         # 4b: she holds no Bob seed, so she signs with her own key; Alice will reject it.
@@ -192,6 +204,17 @@ def _reason(exc: BaseException) -> str:
 def _read(path: str) -> bytes:
     with open(path, "rb") as f:
         return f.read()
+
+
+def _restore_name(path: str) -> str:
+    """Rename a received_<name> file in place to <name> (Alice's original) and return the new path."""
+    directory, name = os.path.split(path)
+    original = name[len("received_"):] if name.startswith("received_") else name
+    if original == name:
+        return path
+    restored = os.path.join(directory, original)
+    os.replace(path, restored)
+    return restored
 
 
 def _shutdown(*socks: socket.socket) -> None:
