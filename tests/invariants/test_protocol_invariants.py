@@ -24,6 +24,7 @@ from qiskit.qasm2 import dumps
 from qkd.core.config import ProtocolParams
 from qkd.core.crypto_utils import decrypt_chunk, derive_chunk_nonce, encrypt_chunk
 from qkd.services.reporting import NullReporter
+from qkd.services.transcript import TranscriptChannel
 from qkd.services.wire import forward_message, recv_json, send_json
 from qkd.usecases import receive_file as bob
 from qkd.usecases import send_file as alice
@@ -35,8 +36,8 @@ PARAMS = ProtocolParams(num_qubits=48)
 
 def test_same_key_on_both_sides_without_eve(connected) -> None:
     a, b = connected(
-        lambda s: alice.run_key_exchange(s, PARAMS, NullReporter()),
-        lambda s: bob.run_key_exchange(s, PARAMS, NullReporter()),
+        lambda s: alice.run_key_exchange(TranscriptChannel(s, "alice"), PARAMS, NullReporter()),
+        lambda s: bob.run_key_exchange(TranscriptChannel(s, "bob"), PARAMS, NullReporter()),
     )
     assert not a.aborted and not b.aborted
     assert a.qber == b.qber == 0.0
@@ -80,7 +81,9 @@ def _flip_every_qubit(qasm: str) -> str:
 
 
 def _flipping_proxy(from_alice: socket.socket, to_bob: socket.socket) -> None:
-    """Flip every qubit, then relay the classical messages up to the QBER verdict."""
+    """Relay the hellos, flip every qubit, then relay the classical messages up to the QBER verdict."""
+    forward_message(from_alice, to_bob)    # Alice's hello
+    forward_message(to_bob, from_alice)    # Bob's hello
     send_json(to_bob, [_flip_every_qubit(q) for q in recv_json(from_alice)])
     forward_message(to_bob, from_alice)    # Bob's bases
     forward_message(from_alice, to_bob)    # matching indices
