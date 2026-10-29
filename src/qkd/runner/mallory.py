@@ -20,7 +20,7 @@ import socket
 import sys
 from pathlib import Path
 
-from qkd.core.config import ALICE_HOST, BOB_PORT, EVE_PORT, IDENTITY_DIR
+from qkd.core.config import ALICE_HOST, AUTH_MODE, BOB_PORT, EVE_PORT, IDENTITY_DIR, ProtocolParams
 from qkd.services.reporting import (
     OUTCOME_ABORTED_AUTH,
     OUTCOME_ABORTED_QBER,
@@ -51,6 +51,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="MITM attack scenario: none (auth off), own_identity (Mallory's key), relay_hello (Bob's hello relayed)",
     )
     parser.add_argument(
+        "--strategy",
+        choices=["own_key", "relay_hello"],
+        default=None,
+        help="MITM attack strategy (default: own_key)",
+    )
+    parser.add_argument(
+        "--auth",
+        choices=["none", "sign", "hybrid"],
+        default=None,
+        help=f"Authentication mode (default: {AUTH_MODE})",
+    )
+    parser.add_argument(
         "--identity",
         default=str(Path(IDENTITY_DIR) / "mallory"),
         help="Mallory's identity directory (default: identity/mallory)",
@@ -70,8 +82,24 @@ def make_reporter(args: argparse.Namespace) -> Reporter:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     reporter = make_reporter(args)
+
+    # Resolve mode and strategy
+    if args.scenario is not None:
+        if args.scenario == "none":
+            mode = "none"
+            strategy = "own_key"
+        elif args.scenario == "relay_hello":
+            mode = args.auth or AUTH_MODE
+            strategy = "relay_hello"
+        else:  # "own_identity"
+            mode = args.auth or AUTH_MODE
+            strategy = "own_key"
+    else:
+        strategy = args.strategy or "own_key"
+        mode = args.auth or AUTH_MODE
+
     if hasattr(reporter, "banner"):
-        reporter.banner("BB84 QKD - MALLORY (Active MITM)", f"Scenario: {args.scenario}")
+        reporter.banner("BB84 QKD - MALLORY (Active MITM)", f"Mode: {mode}, Strategy: {strategy}")
     reporter.section("Setting up Active MITM Proxy")
 
     # Connect to Bob
@@ -114,13 +142,26 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 3
 
+                identity = None
+                if args.identity:
+                    id_path = Path(args.identity)
+                    if (id_path / "identity.seed").exists() and (id_path / "identity.pub").exists():
+                        try:
+                            from qkd.services.identity import load_or_create_identity
+                            id_obj = load_or_create_identity(id_path)
+                            identity = (id_obj.public_key, id_obj.seed)
+                        except Exception as e:
+                            reporter.warning(f"Could not load identity from {id_path}: {e}")
+
                 try:
                     result = run_mitm(
                         alice_sock=alice_sock,
                         bob_sock=bob_sock,
                         reporter=reporter,
-                        scenario=args.scenario,
-                        identity_dir=Path(args.identity),
+                        params=ProtocolParams(),
+                        mode=mode,
+                        strategy=strategy,
+                        identity=identity,
                     )
                 except PeerAuthError as exc:
                     reporter.success(f"Security check passed: Attack BLOCKED by authentication ({exc.reason})")
@@ -131,27 +172,26 @@ def main(argv: list[str] | None = None) -> int:
                     reporter.result(OUTCOME_FAILED, str(exc) or type(exc).__name__)
                     return 1
 
-                if getattr(result, "aborted", False):
-                    outcome = getattr(result, "outcome", OUTCOME_ABORTED_AUTH)
-                    err = getattr(result, "error", "Authentication failed")
-                    stage = getattr(result, "abort_stage", "authentication")
-                    if outcome == OUTCOME_ABORTED_AUTH:
-                        reporter.success(f"Security check passed: Attack BLOCKED in stage '{stage}' ({err})")
-                        reporter.result(OUTCOME_ABORTED_AUTH, err)
-                        return 0
-                    if outcome == OUTCOME_ABORTED_QBER:
-                        reporter.info(f"Attack stopped by QBER threshold: {err}")
-                        reporter.result(OUTCOME_ABORTED_QBER, err)
-                        return 1
-                    reporter.error(f"Attack aborted with unexpected outcome '{outcome}': {err}")
-                    reporter.result(OUTCOME_FAILED, err)
-                    return 1
-
-                # If the attack succeeded (scenario=none):
-                plaintext_sha256 = getattr(result, "plaintext_sha256", None)
-                if plaintext_sha256:
+                if result.plaintext_sha256:
                     reporter.warning("VULNERABILITY DEMONSTRATED: Classical channel was unauthenticated!")
-                    reporter.info(f"Mallory captured plaintext SHA-256: {plaintext_sha256}")
+                    reporter.info(f"Mallory captured plaintext SHA-256: {result.plaintext_sha256}")
+                    reporter.result(OUTCOME_COMPLETED, None)
+                    return 0
+
+                if result.alice_error:
+                    if "qber" in result.alice_error.lower():
+                        reporter.info(f"Attack stopped by QBER threshold: {result.alice_error}")
+                        reporter.result(OUTCOME_ABORTED_QBER, result.alice_error)
+                        return 1
+                    reporter.success(f"Security check passed: Attack BLOCKED by authentication ({result.alice_error})")
+                    reporter.result(OUTCOME_ABORTED_AUTH, result.alice_error)
+                    return 0
+
+                if result.relayed:
+                    reporter.success("Relayed file to Bob undetected")
+                    reporter.result(OUTCOME_COMPLETED, None)
+                    return 0
+
                 reporter.result(OUTCOME_COMPLETED, None)
                 return 0
 

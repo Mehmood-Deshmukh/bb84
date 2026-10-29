@@ -350,7 +350,11 @@ class NodeService:
         self._move(transfer.id, S.accepted)
         rt = self._runtime.setdefault(transfer.id, _Runtime())
         rt.listening = asyncio.get_running_loop().create_future()
-        await self._launch(transfer.id, "bob", ["--port", "0", "--output-dir", self.output_dir, "--transfer-id", transfer.id])
+        args = ["--port", "0", "--output-dir", self.output_dir, "--transfer-id", transfer.id]
+        peer = self._find_peer(transfer.peer.id)
+        if peer and peer.fingerprint:
+            args.extend(["--peer-fingerprint", peer.fingerprint])
+        await self._launch(transfer.id, "bob", args)
 
         try:
             port = await asyncio.wait_for(asyncio.shield(rt.listening), self.listen_timeout)
@@ -378,8 +382,12 @@ class NodeService:
             self._fail(transfer.id, "The uploaded file is no longer available")
             raise LaunchFailed("The uploaded file is no longer available")
         self._move(transfer.id, S.accepted)
-        await self._launch(transfer.id, "alice", [str(rt.upload_path), "--host", transfer.peer.host,
-                                                  "--port", str(receiver_port), "--transfer-id", transfer.id])
+        args = [str(rt.upload_path), "--host", transfer.peer.host,
+                "--port", str(receiver_port), "--transfer-id", transfer.id]
+        peer = self._find_peer(transfer.peer.id)
+        if peer and peer.fingerprint:
+            args.extend(["--peer-fingerprint", peer.fingerprint])
+        await self._launch(transfer.id, "alice", args)
         return self.repo.get(transfer.id)
 
     # ── runner processes and their events ──────────────────────

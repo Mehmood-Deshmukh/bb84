@@ -62,8 +62,9 @@ def test_mallory_missing_mitm_demo_returns_code_3():
     mock_server.accept.return_value = (mock_alice, ("127.0.0.1", 50000))
 
     with patch("qkd.runner.mallory.connect_with_retry", return_value=mock_bob), \
-         patch("qkd.runner.mallory.listen", return_value=mock_server):
-        # Because mitm_demo.py is not landed by Person A yet, importing it fails
+         patch("qkd.runner.mallory.listen", return_value=mock_server), \
+         patch.dict("sys.modules", {"qkd.usecases.mitm_demo": None}):
+        # When mitm_demo.py cannot be imported, it returns 3
         code = main(["--events", "json"])
         assert code == 3
 

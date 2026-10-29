@@ -26,6 +26,8 @@ from tests.services.fakes import (
     alice_script,
     bob_script,
     ev,
+    key_exchange_events,
+    success_tail,
 )
 
 PEER = PeerInfo(id="peer-b", name="bob-laptop", host="10.0.0.2", port=8001)
@@ -187,6 +189,18 @@ def test_peer_trust_put_delete_round_trip(tmp_path: Path, launcher: FakeLauncher
 def test_peer_trust_unknown_peer_returns_error(client: TestClient) -> None:
     assert_error(client.put("/api/v1/peers/unknown-peer/trust"), 404, "peer_not_found")
     assert_error(client.delete("/api/v1/peers/unknown-peer/trust"), 404, "peer_not_found")
+
+
+def test_cors_preflight_allows_put(client: TestClient) -> None:
+    resp = client.options(
+        "/api/v1/peers/p1/trust",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "PUT",
+        },
+    )
+    assert resp.status_code == 200
+    assert "PUT" in resp.headers.get("access-control-allow-methods", "")
 
 
 def test_offer_incoming_matching_fingerprint_succeeds(tmp_path: Path, launcher: FakeLauncher) -> None:
@@ -601,3 +615,89 @@ def test_two_nodes_cancel_propagates(tmp_path: Path) -> None:
         tid = create_outgoing(a, peer_id="node-b").json()["id"]
         assert a.delete(f"/api/v1/transfers/{tid}").json()["status"] == "cancelled"
         assert b.get(f"/api/v1/transfers/{tid}").json()["status"] == "cancelled"
+
+
+def test_two_nodes_honest_hybrid_pinned_keys(tmp_path: Path) -> None:
+    """Sender and receiver nodes transfer under hybrid mode with pinned keys; both report peer_trust: 'pinned'."""
+    router = RoutedPeerClient()
+    gate = threading.Event()
+    a_id = NodeIdentity(id="node-a", name="alice-laptop", host="10.0.0.1", port=8000)
+    b_id = NodeIdentity(id="node-b", name="bob-laptop", host="10.0.0.2", port=8001)
+
+    alice_launcher = FakeLauncher()
+    bob_launcher = FakeLauncher()
+
+    node_a = make_service(tmp_path / "a", alice_launcher, router, [], a_id)
+    node_b = make_service(tmp_path / "b", bob_launcher, router, [], b_id)
+
+    fp_a = node_a.pqc_identity.fingerprint
+    fp_b = node_b.pqc_identity.fingerprint
+
+    # Register each other in directory with matching fingerprints
+    node_a.directory._peers = [PeerInfo(b_id.id, b_id.name, b_id.host, b_id.port, fingerprint=fp_b)]
+    node_b.directory._peers = [PeerInfo(a_id.id, a_id.name, a_id.host, a_id.port, fingerprint=fp_a)]
+
+    # Pin each other in trust stores
+    node_a.trust_store.add(fp_b, name="bob", verified=False)
+    node_b.trust_store.add(fp_a, name="alice", verified=False)
+
+    alice_events = (
+        [ev("stage", "connecting"), ev("stage", "authentication"),
+         ev("metrics", "authentication", auth_mode="hybrid", peer_fingerprint=fp_b, peer_trust="pinned")]
+        + key_exchange_events(qber=0.0)
+        + success_tail({"auth_mode": "hybrid", "peer_fingerprint": fp_b, "peer_trust": "pinned"})
+    )
+    bob_events = (
+        [ev("stage", "connecting"), ev("listening", "connecting", port=45678),
+         ev("stage", "authentication"),
+         ev("metrics", "authentication", auth_mode="hybrid", peer_fingerprint=fp_a, peer_trust="pinned")]
+        + key_exchange_events(qber=0.0)
+        + success_tail({"auth_mode": "hybrid", "peer_fingerprint": fp_a, "peer_trust": "pinned", "output_path": "/tmp/received/file.bin"})
+    )
+
+    alice_launcher.factories["alice"] = lambda args: (gate.set(), FakeProcess(alice_events))[1]
+    bob_launcher.factories["bob"] = lambda args: FakeProcess(bob_events, gate=gate, gate_at=2)
+
+    with TestClient(create_app(node_a)) as a, TestClient(create_app(node_b)) as b:
+        router.routes = {("10.0.0.1", 8000): a, ("10.0.0.2", 8001): b}
+
+        tid = create_outgoing(a, peer_id="node-b").json()["id"]
+        incoming = b.get("/api/v1/transfers", params={"direction": "incoming", "status": "pending"}).json()["items"]
+        assert [t["id"] for t in incoming] == [tid]
+
+        assert b.patch(f"/api/v1/transfers/{tid}", json={"status": "accepted"}).status_code == 202
+
+        res_a = wait_for(a, tid, "completed")
+        res_b = wait_for(b, tid, "completed")
+
+        assert res_a["auth_mode"] == "hybrid"
+        assert res_a["peer_trust"] == "pinned"
+        assert res_a["peer_fingerprint"] == fp_b
+
+        assert res_b["auth_mode"] == "hybrid"
+        assert res_b["peer_trust"] == "pinned"
+        assert res_b["peer_fingerprint"] == fp_a
+
+        hist_a = a.get("/api/v1/history").json()["items"][0]
+        assert hist_a["auth_mode"] == "hybrid"
+        assert hist_a["peer_trust"] == "pinned"
+
+        hist_b = b.get("/api/v1/history").json()["items"][0]
+        assert hist_b["auth_mode"] == "hybrid"
+        assert hist_b["peer_trust"] == "pinned"
+
+
+def test_runners_launched_with_peer_fingerprint(tmp_path: Path) -> None:
+    peer_with_fp = PeerInfo("peer-b", "bob-laptop", "10.0.0.2", 8001, fingerprint="1111-2222-3333-4444")
+    alice_launcher = FakeLauncher(alice=lambda args: FakeProcess(alice_script()))
+    peers = RecordingPeerClient()
+    service = make_service(tmp_path, alice_launcher, peers, [peer_with_fp])
+
+    with TestClient(create_app(service)) as c:
+        tid = create_outgoing(c, peer_id="peer-b").json()["id"]
+        c.patch(f"/api/v1/transfers/{tid}", json={"status": "accepted", "receiver_port": 40001})
+        (_, alice_args, _), = alice_launcher.launches
+        assert "--peer-fingerprint" in alice_args
+        assert alice_args[alice_args.index("--peer-fingerprint") + 1] == "1111-2222-3333-4444"
+
+
