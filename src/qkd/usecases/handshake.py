@@ -34,7 +34,9 @@ from qkd.services.transcript import TranscriptChannel
 from qkd.usecases.common import AuthContext, PeerAuthError
 
 PROTOCOL_VERSION = 1
+MODES = ("none", "sign", "hybrid")
 NONCE_BYTES = 32
+ID_PK_BYTES = 1952  # ML-DSA-65 public key
 FINISHED_PREFIX = b"qkd-finished-v1|"
 
 
@@ -62,9 +64,17 @@ def local_mode(auth: AuthContext | None) -> str:
     return "none" if auth is None else auth.mode
 
 
+def _checked_local_mode(auth: AuthContext | None) -> str:
+    """local_mode(auth), or ValueError for a mode this protocol does not know."""
+    mode = local_mode(auth)
+    if mode not in MODES:
+        raise ValueError(f"Invalid auth mode: {mode!r}. Allowed: {', '.join(MODES)}")
+    return mode
+
+
 def alice_hello(channel: TranscriptChannel, auth: AuthContext | None, reporter: Reporter) -> HandshakeState:
     """Steps 0a/0b for Alice. Returns only once Bob's identity passed the trust check."""
-    state = HandshakeState(local_mode(auth))
+    state = HandshakeState(_checked_local_mode(auth))
     with _cost(channel, state):
         kem_pk = kem_seed = None
         if state.mode == "hybrid":
@@ -82,7 +92,7 @@ def alice_hello(channel: TranscriptChannel, auth: AuthContext | None, reporter: 
 
         kem_ct = None
         if state.signed:
-            state.peer_id_pk = _b64_field(fields, "id_pk", "hello")
+            state.peer_id_pk = _id_pk(fields)
             _nonce(fields)
             if state.mode == "hybrid":
                 kem_ct = _b64_field(fields, "kem_ct", "hello")
@@ -103,7 +113,7 @@ def alice_hello(channel: TranscriptChannel, auth: AuthContext | None, reporter: 
 
 def bob_hello(channel: TranscriptChannel, auth: AuthContext | None, reporter: Reporter) -> HandshakeState:
     """Steps 0a/0b for Bob. Sends his hello only after Alice's identity passed the trust check."""
-    state = HandshakeState(local_mode(auth))
+    state = HandshakeState(_checked_local_mode(auth))
     with _cost(channel, state):
         reporter.info("Waiting for Alice's hello...")
         fields = _hello_fields(channel.recv_json())
@@ -115,7 +125,7 @@ def bob_hello(channel: TranscriptChannel, auth: AuthContext | None, reporter: Re
 
         alice_kem_pk = None
         if state.signed:
-            state.peer_id_pk = _b64_field(fields, "id_pk", "hello")
+            state.peer_id_pk = _id_pk(fields)
             _nonce(fields)
             if state.mode == "hybrid":
                 alice_kem_pk = _b64_field(fields, "kem_pk", "hello")
@@ -187,6 +197,13 @@ def _mismatch(local: str, fields: dict) -> Optional[str]:
     if fields.get("mode") != local:
         return f"mode mismatch: local={local} peer={fields.get('mode')}"
     return None
+
+
+def _id_pk(fields: dict) -> bytes:
+    id_pk = _b64_field(fields, "id_pk", "hello")
+    if len(id_pk) != ID_PK_BYTES:
+        raise PeerAuthError(f"malformed hello: id_pk must be {ID_PK_BYTES} bytes")
+    return id_pk
 
 
 def _nonce(fields: dict) -> bytes:

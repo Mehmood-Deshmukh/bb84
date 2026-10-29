@@ -129,9 +129,10 @@ def test_bob_hybrid_hello_carries_kem_ct_for_alice_kem_pk(keys, parallel) -> Non
     [
         ("sign", {"id_pk": None}),
         ("sign", {"id_pk": "not base64!"}),
+        ("sign", {"id_pk": b64(b"\x00" * 100)}),
         ("hybrid", {"kem_ct": b64(b"\x00" * 10)}),
     ],
-    ids=["missing_id_pk", "bad_base64", "short_kem_ct"],
+    ids=["missing_id_pk", "bad_base64", "short_id_pk", "short_kem_ct"],
 )
 def test_malformed_bob_hello_raises_peer_auth_error(mode: str, bad_fields: dict, keys, parallel) -> None:
     alice_auth, _ = contexts(keys, mode)
@@ -153,6 +154,21 @@ def test_malformed_bob_hello_raises_peer_auth_error(mode: str, bad_fields: dict,
             closing(b, play_bob),
         )
     assert isinstance(err, PeerAuthError)
+    assert "malformed" in err.reason
+
+
+def test_unknown_local_mode_raises_before_any_message(keys) -> None:
+    (a_pk, a_seed), (b_pk, _) = keys["alice"], keys["bob"]
+    bogus = AuthContext("bogus", a_pk, a_seed, PinnedVerifier(b_pk))  # type: ignore[arg-type]
+    for hello in (alice_hello, bob_hello):
+        a, b = socket.socketpair()
+        with a, b:
+            a.settimeout(2)  # a regression that sends or waits fails fast instead of hanging
+            with pytest.raises(ValueError, match="bogus"):
+                hello(TranscriptChannel(a, "alice" if hello is alice_hello else "bob"), bogus, NullReporter())
+            b.setblocking(False)
+            with pytest.raises(BlockingIOError):
+                b.recv(1)  # nothing was sent to the peer
 
 
 def test_alice_peer_closed_during_hello(keys, parallel) -> None:
