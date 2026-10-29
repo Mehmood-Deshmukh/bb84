@@ -109,11 +109,16 @@ def test_known_answer_hkdf() -> None:
     ).derive(qkd_key + kem_ss)
     assert derive_session_key(qkd_key, kem_ss, t_hash, mode="hybrid") == expected_hybrid
 
-    # Independent HKDF computation for sign mode
+
+def test_known_answer_hkdf_sign() -> None:
+    qkd_key = os.urandom(32)
+    t_hash = os.urandom(32)
+
+    # Sign mode has its own info label, separate from hybrid's, for domain separation.
     expected_sign = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=t_hash,
-        info=b"bb84-mlkem768-hybrid-v1",
+        info=b"bb84-sign-v1",
     ).derive(qkd_key)
     assert derive_session_key(qkd_key, None, t_hash, mode="sign") == expected_sign

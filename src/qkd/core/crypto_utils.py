@@ -54,11 +54,11 @@ def derive_session_key(
     """
     Derive a 256-bit AES session key using HKDF-SHA256 based on the authentication mode.
 
-    Modes:
+    Each mode uses its own HKDF info label for explicit domain separation:
       - 'hybrid': Combines QKD key and ML-KEM-768 shared secret:
           ikm = qkd_key || kem_ss, salt = transcript_hash, info = b"bb84-mlkem768-hybrid-v1"
       - 'sign': Uses QKD key only (KEM secret omitted; kem_ss may be None):
-          ikm = qkd_key, salt = transcript_hash, info = b"bb84-mlkem768-hybrid-v1"
+          ikm = qkd_key, salt = transcript_hash, info = b"bb84-sign-v1"
       - 'none': Returns derive_aes_key(qkd_key) for backwards compatibility.
 
     Args:
@@ -91,7 +91,7 @@ def derive_session_key(
             algorithm=hashes.SHA256(),
             length=32,
             salt=transcript_hash,
-            info=b"bb84-mlkem768-hybrid-v1",
+            info=b"bb84-sign-v1",
         )
         return hkdf.derive(ikm)
     elif norm_mode == "none":
