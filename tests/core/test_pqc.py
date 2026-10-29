@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 import pytest
 
@@ -124,6 +125,15 @@ def test_fingerprint() -> None:
     expected_hex = hashlib.sha256(pk1).digest()[:16].hex()
     expected_fp = "-".join(expected_hex[i : i + 4] for i in range(0, 32, 4))
     assert fp1 == expected_fp
+
+
+def test_fingerprint_known_answer() -> None:
+    # Fixed 1952-byte input (ML-DSA-65 public key length): 7 copies of 0..255, then 160 zeros.
+    pk = bytes(range(256)) * 7 + bytes(160)
+    assert len(pk) == 1952
+    # Literal computed once with hashlib alone: first 16 bytes of SHA-256(pk) as 8 groups of 4 hex.
+    assert fingerprint(pk) == "fd55-d65e-e0d7-f3ed-391e-50d2-090c-1858"
+    assert re.fullmatch(r"[0-9a-f]{4}(-[0-9a-f]{4}){7}", fingerprint(pk))
 
 
 def test_sizes() -> None:
