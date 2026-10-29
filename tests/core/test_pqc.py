@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -126,6 +130,15 @@ def test_fingerprint() -> None:
     assert fp1 == expected_fp
 
 
+def test_fingerprint_known_answer() -> None:
+    # Fixed 1952-byte input (ML-DSA-65 public key length): 7 copies of 0..255, then 160 zeros.
+    pk = bytes(range(256)) * 7 + bytes(160)
+    assert len(pk) == 1952
+    # Literal computed once with hashlib alone: first 16 bytes of SHA-256(pk) as 8 groups of 4 hex.
+    assert fingerprint(pk) == "fd55-d65e-e0d7-f3ed-391e-50d2-090c-1858"
+    assert re.fullmatch(r"[0-9a-f]{4}(-[0-9a-f]{4}){7}", fingerprint(pk))
+
+
 def test_sizes() -> None:
     sig_pk, sig_seed = sig_keygen()
     sig = sign(sig_seed, b"payload")
@@ -140,3 +153,29 @@ def test_sizes() -> None:
     ss, ct = kem_encaps(kem_pk)
     assert len(ct) == 1088  # ML-KEM-768 ciphertext length
     assert len(ss) == 32  # Shared secret length
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "cryptography.hazmat.primitives.asymmetric.mlkem",
+        "cryptography.hazmat.primitives.asymmetric.mldsa",
+    ],
+)
+def test_import_error_names_required_version(missing: str) -> None:
+    # In a fresh interpreter, make the PQC primitive unavailable and confirm pqc re-raises
+    # a clear ImportError naming the required cryptography version.
+    code = textwrap.dedent(
+        f"""
+        import sys
+        sys.modules[{missing!r}] = None
+        try:
+            import qkd.core.pqc
+        except ImportError as exc:
+            assert "cryptography>=50" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected ImportError when a PQC primitive is unavailable")
+        """
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr

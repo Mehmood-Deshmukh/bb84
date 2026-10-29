@@ -2,10 +2,13 @@
 Eve's workflow: intercept-resend attack on the quantum channel, transparent
 forwarding of the classical channel.
 
-Eve parses the first messages of the wire protocol (qubits, bases, matching
-indices, QBER sample exchange, QBER verdict) and then blindly forwards the rest.
+Eve forwards both hellos unchanged (steps 0a/0b; she reads the mode from Alice's),
+then parses the next messages of the wire protocol (qubits, bases, matching
+indices, QBER sample exchange, QBER verdict) and blindly forwards the rest.
 Because she must measure each qubit in a guessed basis, she disturbs about 25%
-of the sifted bits, which pushes the QBER over the threshold.
+of the sifted bits, which pushes the QBER over the threshold. The QBER abort at
+step 3 happens before the finished exchange (4b), so in sign and hybrid modes the
+run still ends in a QBER abort, not an authentication failure.
 """
 
 from __future__ import annotations
@@ -28,6 +31,15 @@ class EavesdropResult:
     bits_known: int  # sifted positions where Eve's basis matched Bob's
     qber: float
     aborted: bool
+
+
+def _forward_hellos(alice: socket.socket, bob: socket.socket, reporter: Reporter) -> bool:
+    """Forward steps 0a and 0b unchanged. Returns True when the peers run a signed mode."""
+    reporter.section("Phase 0: Forwarding Authentication Hellos (Unchanged)")
+    mode = json.loads(forward_message(alice, bob))["hello"]["mode"]   # 0a
+    forward_message(bob, alice)                                       # 0b
+    reporter.info(f"Hellos forwarded (mode: {mode})")
+    return mode != "none"
 
 
 def _intercept_qubits(alice: socket.socket, bob: socket.socket, reporter: Reporter) -> list[str]:
@@ -82,9 +94,13 @@ def _report_knowledge(eve_bases: list[str], bob_bases: list[str], matching: list
     return known
 
 
-def _forward_rest(alice: socket.socket, bob: socket.socket) -> None:
-    """Forward Alice's remaining messages (salt, file metadata, chunks) until she disconnects."""
+def _forward_rest(alice: socket.socket, bob: socket.socket, signed: bool) -> None:
+    """Forward the salt, the finished exchange (signed modes), then file metadata and chunks until Alice disconnects."""
     try:
+        forward_message(alice, bob)        # 4: salt
+        if signed:
+            forward_message(bob, alice)    # 4b: Bob's finished
+            forward_message(alice, bob)    # 4b: Alice's finished
         while True:
             forward_message(alice, bob)
     except (ConnectionError, OSError):
@@ -93,6 +109,7 @@ def _forward_rest(alice: socket.socket, bob: socket.socket) -> None:
 
 def run_eavesdrop(alice: socket.socket, bob: socket.socket, reporter: Reporter, threshold: float = QBER_THRESHOLD) -> EavesdropResult:
     """Run the intercept-resend attack between connected Alice and Bob sockets."""
+    signed = _forward_hellos(alice, bob, reporter)
     eve_bases = _intercept_qubits(alice, bob, reporter)
     bob_bases, matching = _forward_sifting(alice, bob, reporter)
     known = _report_knowledge(eve_bases, bob_bases, matching, reporter)
@@ -114,6 +131,6 @@ def run_eavesdrop(alice: socket.socket, bob: socket.socket, reporter: Reporter, 
         reporter.info("  • QBER estimation catches the introduced errors")
     else:
         reporter.info(f"QBER = {qber*100:.2f}% — Surprisingly low! Continuing...")
-        _forward_rest(alice, bob)
+        _forward_rest(alice, bob, signed)
 
     return EavesdropResult(sifted_length=len(matching), bits_known=known, qber=qber, aborted=aborted)
