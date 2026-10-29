@@ -18,7 +18,7 @@ BB84 quantum key distribution (simulated with Qiskit Aer) used to derive an AES-
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[backend,dev]"          # extras: backend, dev, experiments, hardware
 
-pytest                                    # whole suite (~345 tests, ~85 s; includes 100 MB transfers)
+pytest                                    # whole suite (350 tests, ~84 s; includes 100 MB transfers)
 pytest tests/services/test_api.py -k cancel
 pytest tests/invariants                   # real Alice/Bob runs on the Aer simulator
 
