@@ -62,6 +62,30 @@ OUTPUT_DIR = _env("OUTPUT_DIR", "received", str)
 # Transfer history written by the backend node
 HISTORY_FILE = _env("HISTORY_FILE", "history.json", str)
 
+# ─────────────────────────────────────────────
+# Authentication & PQC Configuration
+# ─────────────────────────────────────────────
+def _validate_auth_mode(raw: str) -> str:
+    val = raw.strip().lower()
+    if val not in {"none", "sign", "hybrid"}:
+        raise ValueError(f"Invalid auth mode: {raw!r}. Allowed: none, sign, hybrid")
+    return val
+
+
+def _cast_tofu(raw: str) -> int:
+    val = raw.strip().lower()
+    if val in ("1", "true", "yes"):
+        return 1
+    if val in ("0", "false", "no"):
+        return 0
+    return int(raw)
+
+
+AUTH_MODE = _env("AUTH_MODE", "hybrid", _validate_auth_mode)
+IDENTITY_DIR = _env("IDENTITY_DIR", "identity", str)
+KNOWN_PEERS_FILE = _env("KNOWN_PEERS_FILE", "known_peers.json", str)
+TOFU = _env("TOFU", 1, _cast_tofu)
+
 
 @dataclass(frozen=True)
 class ProtocolParams:

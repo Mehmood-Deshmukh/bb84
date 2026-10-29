@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "qiskit>=1.0",
     "qiskit-aer>=0.14",
-    "cryptography>=42",
+    "cryptography>=50",
 ]
 
 [project.optional-dependencies]

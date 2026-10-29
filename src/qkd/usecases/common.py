@@ -3,10 +3,46 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional, Protocol, runtime_checkable
 
 from qkd.core.bb84_protocol import qber_exceeds_threshold
 from qkd.services.reporting import Reporter
+
+
+class PeerAuthError(Exception):
+    """Raised when peer authentication or verification fails."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@runtime_checkable
+class PeerVerifier(Protocol):
+    """Protocol for checking a peer public key against a trust policy."""
+
+    def check(self, peer_public_key: bytes) -> str:
+        """
+        Verify peer public key against trust policy.
+
+        Returns:
+            "new" | "pinned" | "verified"
+
+        Raises:
+            PeerAuthError: If authentication fails.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    """Authentication context holding node identity and peer verifier."""
+
+    mode: Literal["none", "sign", "hybrid"]
+    public_key: bytes
+    seed: bytes
+    verifier: PeerVerifier
+
 
 
 @dataclass(frozen=True)

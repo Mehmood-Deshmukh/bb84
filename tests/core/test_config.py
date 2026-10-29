@@ -50,3 +50,42 @@ def test_protocol_params_pick_up_overrides() -> None:
 def test_invalid_value_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="QKD_NUM_QUBITS"):
         read_config({"QKD_NUM_QUBITS": "lots"}, "NUM_QUBITS")
+
+
+def test_auth_defaults() -> None:
+    values = read_config({}, "AUTH_MODE", "IDENTITY_DIR", "KNOWN_PEERS_FILE", "TOFU")
+    assert values == {
+        "AUTH_MODE": "hybrid",
+        "IDENTITY_DIR": "identity",
+        "KNOWN_PEERS_FILE": "known_peers.json",
+        "TOFU": 1,
+    }
+
+
+
+def test_auth_env_overrides() -> None:
+    env = {
+        "QKD_AUTH_MODE": "sign",
+        "QKD_IDENTITY_DIR": "custom_ident",
+        "QKD_KNOWN_PEERS_FILE": "custom_peers.json",
+        "QKD_TOFU": "0",
+    }
+    values = read_config(env, "AUTH_MODE", "IDENTITY_DIR", "KNOWN_PEERS_FILE", "TOFU")
+    assert values == {
+        "AUTH_MODE": "sign",
+        "IDENTITY_DIR": "custom_ident",
+        "KNOWN_PEERS_FILE": "custom_peers.json",
+        "TOFU": 0,
+    }
+
+
+@pytest.mark.parametrize("mode", ["none", "sign", "hybrid"])
+def test_auth_mode_allowed_values(mode: str) -> None:
+    values = read_config({"QKD_AUTH_MODE": mode}, "AUTH_MODE")
+    assert values["AUTH_MODE"] == mode
+
+
+def test_auth_mode_invalid_rejected() -> None:
+    with pytest.raises(RuntimeError, match="QKD_AUTH_MODE"):
+        read_config({"QKD_AUTH_MODE": "invalid_mode"}, "AUTH_MODE")
+

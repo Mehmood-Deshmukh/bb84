@@ -27,7 +27,7 @@ from qkd.core.quantum_channel import prepare_qubits
 from qkd.services.file_stream import describe_file, send_encrypted_file
 from qkd.services.reporting import Reporter
 from qkd.services.wire import recv_json, send_json
-from qkd.usecases.common import KeyExchangeResult, report_qber_verdict, report_summary
+from qkd.usecases.common import AuthContext, KeyExchangeResult, report_qber_verdict, report_summary
 
 
 def _transmit_qubits(sock: socket.socket, n: int, reporter: Reporter) -> tuple[list[int], list[str]]:
@@ -114,6 +114,7 @@ def send_file(
     filepath: str,
     reporter: Reporter,
     params: ProtocolParams = ProtocolParams(),
+    auth: AuthContext | None = None,
 ) -> KeyExchangeResult:
     """Run the key exchange and, unless it aborts, stream the encrypted file."""
     t_start = time.perf_counter()
