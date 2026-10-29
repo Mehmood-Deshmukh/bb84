@@ -8,7 +8,7 @@ BB84 quantum key distribution (simulated with Qiskit Aer) used to derive an AES-
 
 - `core/`: protocol steps (`bb84_protocol.py`), simulated channel and Eve's attack (`quantum_channel.py`), AES-GCM/HKDF (`crypto_utils.py`), and `config.py`. **core must not import from services, usecases, or runner** (enforced by `tests/test_setup.py`).
 - `services/`: wire framing (`wire.py`), transcript hashing over the wire (`transcript.py`), chunked file streaming (`file_stream.py`), reporters and JSON events (`reporting.py`), and the backend pieces: `node.py` (NodeService, the transfer orchestration), `transfer_store.py` (state machine + repository), `events.py` (EventBus), `discovery.py` (mDNS), `peer_client.py`, `process_runner.py`, `history.py`, and `api/` (FastAPI factory, routes, Pydantic models, error handlers).
-- `usecases/`: `send_file` (Alice), `receive_file` (Bob), `eavesdrop_demo` (Eve), and `handshake` (the signed hello/finished helpers they share). These are workflows combining core and services.
+- `usecases/`: `send_file` (Alice), `receive_file` (Bob), `eavesdrop_demo` (Eve), `mitm_demo` (Mallory, the man-in-the-middle demo), and `handshake` (the signed hello/finished helpers they share). These are workflows combining core and services.
 - `runner/`: thin argparse CLIs `alice`, `bob`, `eve`, `node` (console scripts `qkd-alice`, `qkd-bob`, `qkd-eve`, `qkd-node`).
 - `app/frontend/`: React 19 + Vite 8 + Tailwind v4 UI.
 
@@ -18,7 +18,7 @@ BB84 quantum key distribution (simulated with Qiskit Aer) used to derive an AES-
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[backend,dev]"          # extras: backend, dev, experiments, hardware
 
-pytest                                    # whole suite (~330 tests, ~40 s; includes 100 MB transfers)
+pytest                                    # whole suite (~345 tests, ~85 s; includes 100 MB transfers)
 pytest tests/services/test_api.py -k cancel
 pytest tests/invariants                   # real Alice/Bob runs on the Aer simulator
 
@@ -38,7 +38,7 @@ Running two nodes on one machine works: give each its own `--port`, `QKD_NODE_NA
 ## Architecture notes
 
 ### Wire protocol (send_file / receive_file / eavesdrop_demo)
-Single TCP connection. Every message is a 4-byte big-endian length prefix plus JSON or raw bytes, and goes through `qkd.services.wire` only. The message order is fixed and must change in lockstep in **usecases/send_file.py, receive_file.py, handshake.py, and eavesdrop_demo.py** (Eve forwards the hellos, parses the next messages, then blindly forwards the rest; the invariants test has its own flipping proxy that also follows the order). Steps 0 to 4 go through a `TranscriptChannel`; "tracked" messages are hashed into the transcript, untracked ones are not:
+Single TCP connection. Every message is a 4-byte big-endian length prefix plus JSON or raw bytes, and goes through `qkd.services.wire` only. The message order is fixed and must change in lockstep in **usecases/send_file.py, receive_file.py, handshake.py, eavesdrop_demo.py, and mitm_demo.py** (Eve forwards the hellos, parses the next messages, then blindly forwards the rest; Mallory's relay strategy runs Bob's side against Alice; the invariants tests share one ordered step list, `WIRE_STEPS` in **tests/invariants/support.py**, that drives a generic tamper/relay proxy). Steps 0 to 4 go through a `TranscriptChannel`; "tracked" messages are hashed into the transcript, untracked ones are not:
 
 0. Alice → `{"hello"}`; Bob → `{"hello"}` (tracked). Fields per mode (binary values base64): none `{v, mode}`; sign adds `id_pk`, `nonce` (32 B); hybrid adds Alice's `kem_pk` and Bob's `kem_ct`. Each side runs `auth.verifier.check(peer id_pk)` on arrival; Alice sends no qubits unless it passed. On a mode or version mismatch Bob still replies with `{v, mode}`, and both raise `PeerAuthError` (no fallback)
 1. Alice → qubits as a list of QASM2 strings (untracked)
