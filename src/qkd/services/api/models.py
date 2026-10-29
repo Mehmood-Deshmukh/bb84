@@ -21,6 +21,7 @@ class TransferStatus(str, Enum):
     completed = "completed"
     rejected = "rejected"
     aborted_qber = "aborted_qber"
+    aborted_auth = "aborted_auth"
     failed = "failed"
     cancelled = "cancelled"
 
@@ -65,6 +66,11 @@ class Transfer(BaseModel):
     progress: Optional[TransferProgress] = None
     output_path: Optional[str] = Field(None, description="Where the received file was written (incoming only)")
     error: Optional[str] = None
+    auth_mode: Optional[str] = None
+    peer_fingerprint: Optional[str] = None
+    peer_trust: Optional[str] = None
+    handshake_ms: Optional[float] = None
+    auth_overhead_bytes: Optional[int] = None
 
 
 class TransferList(BaseModel):
@@ -78,6 +84,7 @@ class IncomingTransferRequest(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     file_size: int = Field(ge=0)
     sender: PeerRef
+    sender_fingerprint: Optional[str] = None
 
 
 class TransferPatch(BaseModel):
@@ -99,6 +106,7 @@ class Node(BaseModel):
     port: int
     status: Literal["idle", "busy"]
     version: str
+    fingerprint: str
 
 
 class NodePatch(BaseModel):
@@ -111,6 +119,8 @@ class Peer(BaseModel):
     host: str
     port: int
     reachable: bool
+    fingerprint: str = ""
+    trust: Literal["new", "pinned", "verified"] = "new"
 
 
 class PeerList(BaseModel):
@@ -129,6 +139,9 @@ class HistoryEntry(BaseModel):
     qber: Optional[float] = None
     key_bits: Optional[int] = None
     error: Optional[str] = None
+    auth_mode: Optional[str] = None
+    peer_fingerprint: Optional[str] = None
+    peer_trust: Optional[str] = None
 
 
 class HistoryList(BaseModel):

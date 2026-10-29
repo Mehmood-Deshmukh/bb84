@@ -47,6 +47,8 @@ def make_service(tmp_path: Path, launcher: FakeLauncher, peers, directory_peers=
         upload_dir=str(tmp_path / f"uploads-{identity.id}"),
         version="test",
         listen_timeout=5,
+        identity_dir=tmp_path / f"identity-{identity.id}",
+        known_peers_file=tmp_path / f"known-peers-{identity.id}.json",
     )
 
 
@@ -107,7 +109,16 @@ def assert_error(resp, status: int, code: str) -> dict:
 
 def test_get_node(client: TestClient) -> None:
     body = client.get("/api/v1/node").json()
-    assert body == {"id": "self", "name": "self-node", "host": "10.0.0.9", "port": 8000, "status": "idle", "version": "test"}
+    service = client.app.state.service
+    assert body == {
+        "id": "self",
+        "name": "self-node",
+        "host": "10.0.0.9",
+        "port": 8000,
+        "status": "idle",
+        "version": "test",
+        "fingerprint": service.pqc_identity.fingerprint,
+    }
 
 
 def test_rename_node(client: TestClient) -> None:
@@ -121,13 +132,93 @@ def test_rename_node_validation(client: TestClient, name: str) -> None:
 
 
 def test_list_and_get_peers(client: TestClient) -> None:
-    peer = {"id": PEER.id, "name": PEER.name, "host": PEER.host, "port": PEER.port, "reachable": True}
+    peer = {
+        "id": PEER.id,
+        "name": PEER.name,
+        "host": PEER.host,
+        "port": PEER.port,
+        "reachable": True,
+        "fingerprint": PEER.fingerprint,
+        "trust": "new",
+    }
     assert client.get("/api/v1/peers").json() == {"items": [peer]}
     assert client.get(f"/api/v1/peers/{PEER.id}").json() == peer
 
 
 def test_unknown_peer_is_404(client: TestClient) -> None:
     assert_error(client.get("/api/v1/peers/nope"), 404, "peer_not_found")
+
+
+def test_peer_trust_put_delete_round_trip(tmp_path: Path, launcher: FakeLauncher) -> None:
+    peer_with_fp = PeerInfo(
+        id="peer-fp",
+        name="charlie-laptop",
+        host="10.0.0.3",
+        port=8002,
+        fingerprint="1234-5678-90ab-cdef-1234-5678-90ab-cdef",
+    )
+    service = make_service(tmp_path, launcher, RecordingPeerClient(), directory_peers=[peer_with_fp])
+    app = create_app(service)
+
+    with TestClient(app) as c:
+        # Initially trust is "new"
+        initial = c.get(f"/api/v1/peers/{peer_with_fp.id}").json()
+        assert initial["trust"] == "new"
+        assert initial["fingerprint"] == peer_with_fp.fingerprint
+
+        # PUT marks verified
+        put_resp = c.put(f"/api/v1/peers/{peer_with_fp.id}/trust")
+        assert put_resp.status_code == 200
+        assert put_resp.json()["trust"] == "verified"
+        assert put_resp.json()["fingerprint"] == peer_with_fp.fingerprint
+
+        # GET confirms verified
+        assert c.get(f"/api/v1/peers/{peer_with_fp.id}").json()["trust"] == "verified"
+
+        # DELETE forgets trust (returns to "new")
+        del_resp = c.delete(f"/api/v1/peers/{peer_with_fp.id}/trust")
+        assert del_resp.status_code == 200
+        assert del_resp.json()["trust"] == "new"
+
+        # GET confirms "new"
+        assert c.get(f"/api/v1/peers/{peer_with_fp.id}").json()["trust"] == "new"
+
+
+def test_peer_trust_unknown_peer_returns_error(client: TestClient) -> None:
+    assert_error(client.put("/api/v1/peers/unknown-peer/trust"), 404, "peer_not_found")
+    assert_error(client.delete("/api/v1/peers/unknown-peer/trust"), 404, "peer_not_found")
+
+
+def test_offer_incoming_matching_fingerprint_succeeds(tmp_path: Path, launcher: FakeLauncher) -> None:
+    fp = "aaaa-bbbb-cccc-dddd-1111-2222-3333-4444"
+    sender_peer = PeerInfo(id="sender-node", name="sender", host="10.0.0.1", port=8000, fingerprint=fp)
+    service = make_service(tmp_path, launcher, RecordingPeerClient(), directory_peers=[sender_peer])
+    app = create_app(service)
+
+    with TestClient(app) as c:
+        resp = offer_incoming(
+            c,
+            transfer_id="t-matched-1",
+            sender={"id": "sender-node", "name": "sender", "host": "10.0.0.1", "port": 8000},
+            sender_fingerprint=fp,
+        )
+        assert resp.status_code == 201
+
+
+def test_offer_incoming_mismatched_fingerprint_is_409(tmp_path: Path, launcher: FakeLauncher) -> None:
+    fp_mdns = "aaaa-bbbb-cccc-dddd-1111-2222-3333-4444"
+    sender_peer = PeerInfo(id="sender-node", name="sender", host="10.0.0.1", port=8000, fingerprint=fp_mdns)
+    service = make_service(tmp_path, launcher, RecordingPeerClient(), directory_peers=[sender_peer])
+    app = create_app(service)
+
+    with TestClient(app) as c:
+        resp = offer_incoming(
+            c,
+            transfer_id="t-mismatched-1",
+            sender={"id": "sender-node", "name": "sender", "host": "10.0.0.1", "port": 8000},
+            sender_fingerprint="ffff-ffff-ffff-ffff-ffff-ffff-ffff-ffff",
+        )
+        assert_error(resp, 409, "fingerprint_mismatch")
 
 
 # ── creating transfers ─────────────────────────────────────────
@@ -146,6 +237,7 @@ def test_create_outgoing_transfer(client: TestClient, peers: RecordingPeerClient
     assert (host, port) == (PEER.host, PEER.port)
     assert offer.id == body["id"]
     assert offer.sender.id == "self"
+    assert offer.sender_fingerprint == client.app.state.service.pqc_identity.fingerprint
 
 
 def test_create_outgoing_unknown_peer(client: TestClient) -> None:
@@ -332,6 +424,28 @@ def test_qber_abort(tmp_path: Path, peers: RecordingPeerClient) -> None:
         assert body["key_bits"] is None
 
 
+def test_auth_abort(tmp_path: Path, peers: RecordingPeerClient) -> None:
+    launcher = FakeLauncher(alice=lambda args: FakeProcess(alice_script("aborted_auth"), exit_code=1))
+    with TestClient(create_app(make_service(tmp_path, launcher, peers))) as c:
+        tid = create_outgoing(c).json()["id"]
+        c.patch(f"/api/v1/transfers/{tid}", json={"status": "accepted", "receiver_port": 40001})
+        body = wait_for(c, tid, "aborted_auth")
+        assert body["status"] == "aborted_auth"
+        assert body["auth_mode"] == "hybrid"
+        assert body["peer_fingerprint"] == "1111-2222-3333-4444"
+        assert body["peer_trust"] == "new"
+        assert body["error"] == "Peer authentication failed: key mismatch"
+        assert body["key_bits"] is None
+
+        (entry,) = c.get("/api/v1/history").json()["items"]
+        assert entry["id"] == tid
+        assert entry["status"] == "aborted_auth"
+        assert entry["auth_mode"] == "hybrid"
+        assert entry["peer_fingerprint"] == "1111-2222-3333-4444"
+        assert entry["peer_trust"] == "new"
+        assert entry["error"] == "Peer authentication failed: key mismatch"
+
+
 def test_process_exit_without_result_is_failed(tmp_path: Path, peers: RecordingPeerClient) -> None:
     launcher = FakeLauncher(alice=lambda args: FakeProcess([ev("stage", "connecting"), ev("log", message="Traceback ...")], exit_code=1))
     with TestClient(create_app(make_service(tmp_path, launcher, peers))) as c:
@@ -425,8 +539,8 @@ def test_openapi_schema_and_docs(client: TestClient) -> None:
     spec = client.get("/openapi.json").json()
     assert spec["openapi"].startswith("3.")
     assert set(spec["paths"]) == {
-        "/api/v1/node", "/api/v1/peers", "/api/v1/peers/{peer_id}", "/api/v1/transfers",
-        "/api/v1/transfers/incoming", "/api/v1/transfers/{transfer_id}",
+        "/api/v1/node", "/api/v1/peers", "/api/v1/peers/{peer_id}", "/api/v1/peers/{peer_id}/trust",
+        "/api/v1/transfers", "/api/v1/transfers/incoming", "/api/v1/transfers/{transfer_id}",
         "/api/v1/transfers/{transfer_id}/events", "/api/v1/history",
     }
     transfer = spec["paths"]["/api/v1/transfers/{transfer_id}"]

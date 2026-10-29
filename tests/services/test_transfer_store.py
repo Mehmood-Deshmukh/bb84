@@ -21,8 +21,8 @@ from qkd.services.transfer_store import (
 ALLOWED = {
     (S.pending, S.accepted), (S.pending, S.rejected), (S.pending, S.failed), (S.pending, S.cancelled),
     (S.accepted, S.key_exchange), (S.accepted, S.failed), (S.accepted, S.cancelled),
-    (S.key_exchange, S.transferring), (S.key_exchange, S.aborted_qber), (S.key_exchange, S.failed),
-    (S.key_exchange, S.cancelled),
+    (S.key_exchange, S.transferring), (S.key_exchange, S.aborted_qber), (S.key_exchange, S.aborted_auth),
+    (S.key_exchange, S.failed), (S.key_exchange, S.cancelled),
     (S.transferring, S.completed), (S.transferring, S.failed), (S.transferring, S.cancelled),
 }
 
@@ -33,7 +33,7 @@ def test_transition_table(current: S, target: S) -> None:
 
 
 def test_terminal_states_have_no_exits() -> None:
-    assert TERMINAL == {S.completed, S.rejected, S.aborted_qber, S.failed, S.cancelled}
+    assert TERMINAL == {S.completed, S.rejected, S.aborted_qber, S.aborted_auth, S.failed, S.cancelled}
     assert all(not TRANSITIONS[s] for s in TERMINAL)
 
 
@@ -41,6 +41,7 @@ def test_terminal_states_have_no_exits() -> None:
     (S.accepted, S.transferring, [S.key_exchange, S.transferring]),
     (S.accepted, S.completed, [S.key_exchange, S.transferring, S.completed]),
     (S.accepted, S.aborted_qber, [S.key_exchange, S.aborted_qber]),
+    (S.accepted, S.aborted_auth, [S.key_exchange, S.aborted_auth]),
     (S.key_exchange, S.completed, [S.transferring, S.completed]),
     (S.transferring, S.cancelled, [S.cancelled]),
 ])
@@ -50,6 +51,7 @@ def test_path_to_follows_happy_path(current: S, target: S, steps: list[S]) -> No
 
 @pytest.mark.parametrize(("current", "target"), [
     (S.pending, S.key_exchange), (S.pending, S.completed), (S.transferring, S.aborted_qber),
+    (S.transferring, S.aborted_auth),
     (S.completed, S.cancelled), (S.cancelled, S.cancelled), (S.rejected, S.accepted),
 ])
 def test_path_to_rejects_invalid(current: S, target: S) -> None:

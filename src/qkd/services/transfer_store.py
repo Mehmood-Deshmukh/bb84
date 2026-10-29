@@ -4,10 +4,10 @@ Transfer state machine and storage.
     pending -> accepted -> key_exchange -> transferring -> completed
        |          |             |               |
        |          +-------------+---------------+--> failed, cancelled
-       |                        +--> aborted_qber
+       |                        +--> aborted_qber, aborted_auth
        +--> rejected, failed, cancelled
 
-completed, rejected, aborted_qber, failed, and cancelled are terminal.
+completed, rejected, aborted_qber, aborted_auth, failed, and cancelled are terminal.
 """
 
 from __future__ import annotations
@@ -19,13 +19,13 @@ from qkd.services.api.models import Direction, Transfer, TransferStatus, utcnow
 
 S = TransferStatus
 
-TERMINAL: frozenset[TransferStatus] = frozenset({S.completed, S.rejected, S.aborted_qber, S.failed, S.cancelled})
+TERMINAL: frozenset[TransferStatus] = frozenset({S.completed, S.rejected, S.aborted_qber, S.aborted_auth, S.failed, S.cancelled})
 ACTIVE: frozenset[TransferStatus] = frozenset({S.accepted, S.key_exchange, S.transferring})
 
 TRANSITIONS: dict[TransferStatus, frozenset[TransferStatus]] = {
     S.pending: frozenset({S.accepted, S.rejected, S.failed, S.cancelled}),
     S.accepted: frozenset({S.key_exchange, S.failed, S.cancelled}),
-    S.key_exchange: frozenset({S.transferring, S.aborted_qber, S.failed, S.cancelled}),
+    S.key_exchange: frozenset({S.transferring, S.aborted_qber, S.aborted_auth, S.failed, S.cancelled}),
     S.transferring: frozenset({S.completed, S.failed, S.cancelled}),
     **{s: frozenset() for s in TERMINAL},
 }

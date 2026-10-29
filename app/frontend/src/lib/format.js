@@ -43,6 +43,7 @@ export const STATUS_LABEL = {
   completed: 'Completed',
   rejected: 'Declined',
   aborted_qber: 'Aborted: QBER too high',
+  aborted_auth: 'Aborted: Impersonation detected',
   failed: 'Failed',
   cancelled: 'Cancelled',
 }
@@ -50,10 +51,12 @@ export const STATUS_LABEL = {
 /** @type {Record<Stage, string>} */
 export const STAGE_LABEL = {
   connecting: 'Connect',
+  authentication: 'Authenticate',
   quantum_transmission: 'Send qubits',
   sifting: 'Sift bases',
   qber_estimation: 'Estimate QBER',
   privacy_amplification: 'Amplify privacy',
+  key_confirmation: 'Confirm key',
   file_transfer: 'Stream file',
   done: 'Done',
 }

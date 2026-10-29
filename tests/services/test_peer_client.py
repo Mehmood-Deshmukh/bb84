@@ -25,8 +25,13 @@ def client_with(handler) -> tuple[HttpPeerClient, list[httpx.Request]]:
 
 def test_offer_respond_cancel_requests() -> None:
     client, seen = client_with(lambda r: httpx.Response(201 if r.method == "POST" else 200, json={}))
-    offer = IncomingTransferRequest(id="t1", filename="a.bin", file_size=3,
-                                    sender=PeerRef(id="n", name="n", host="10.0.0.1", port=8000))
+    offer = IncomingTransferRequest(
+        id="t1",
+        filename="a.bin",
+        file_size=3,
+        sender=PeerRef(id="n", name="n", host="10.0.0.1", port=8000),
+        sender_fingerprint="1234-5678-90ab-cdef-1234-5678-90ab-cdef",
+    )
 
     async def run() -> None:
         await client.offer_transfer("10.0.0.2", 8001, offer)
@@ -42,6 +47,7 @@ def test_offer_respond_cancel_requests() -> None:
         ("DELETE", "http://10.0.0.2:8001/api/v1/transfers/t1"),
     ]
     assert json.loads(seen[0].content)["sender"]["port"] == 8000
+    assert json.loads(seen[0].content)["sender_fingerprint"] == "1234-5678-90ab-cdef-1234-5678-90ab-cdef"
     assert json.loads(seen[1].content) == {"status": "accepted", "receiver_port": 5000}
     assert json.loads(seen[2].content) == {"status": "rejected"}
 

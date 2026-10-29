@@ -64,6 +64,22 @@ async def get_peer(peer_id: str, request: Request) -> Peer:
         raise ApiError(404, "peer_not_found", f"No discovered peer with id '{peer_id}'") from None
 
 
+@router.put("/peers/{peer_id}/trust", response_model=Peer, tags=["peers"], summary="Mark a peer's key as verified", responses=_errors(404))
+async def mark_peer_verified(peer_id: str, request: Request) -> Peer:
+    try:
+        return await _service(request).set_peer_trust(peer_id, verified=True)
+    except UnknownPeer:
+        raise ApiError(404, "peer_not_found", f"No discovered peer with id '{peer_id}'") from None
+
+
+@router.delete("/peers/{peer_id}/trust", response_model=Peer, tags=["peers"], summary="Forget trust for a peer", responses=_errors(404))
+async def forget_peer_trust(peer_id: str, request: Request) -> Peer:
+    try:
+        return await _service(request).delete_peer_trust(peer_id)
+    except UnknownPeer:
+        raise ApiError(404, "peer_not_found", f"No discovered peer with id '{peer_id}'") from None
+
+
 # ── transfers ──────────────────────────────────────────────────
 
 @router.post(

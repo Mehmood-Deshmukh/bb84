@@ -16,7 +16,7 @@ from typing import Optional, Protocol
 log = logging.getLogger(__name__)
 
 SERVICE_TYPE = "_qkd._tcp.local."
-TXT_VERSION = "2"
+TXT_VERSION = "3"
 
 
 @dataclass
@@ -25,6 +25,7 @@ class NodeIdentity:
     name: str
     host: str
     port: int
+    fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class PeerInfo:
     name: str
     host: str
     port: int
+    fingerprint: str = ""
 
 
 class PeerDirectory(Protocol):
@@ -96,12 +98,13 @@ class ZeroconfPeerDirectory:
         from zeroconf import ServiceInfo
 
         self._self_id = identity.id
+        props = {"id": identity.id, "version": TXT_VERSION, "fp": identity.fingerprint}
         info = ServiceInfo(
             SERVICE_TYPE,
             f"{identity.name}.{SERVICE_TYPE}",
             addresses=[socket.inet_aton(identity.host)],
             port=identity.port,
-            properties={"id": identity.id, "version": TXT_VERSION},
+            properties=props,
             server=f"qkd-{identity.id}.local.",
         )
         if self._zc is None:
@@ -136,4 +139,5 @@ class ZeroconfPeerDirectory:
             name=display,
             host=socket.inet_ntoa(info.addresses[0]),
             port=info.port,
+            fingerprint=props.get("fp", ""),
         )

@@ -41,6 +41,7 @@ EVENT_LISTENING = "listening"
 # Values of the "outcome" field in a result event
 OUTCOME_COMPLETED = "completed"
 OUTCOME_ABORTED_QBER = "aborted_qber"
+OUTCOME_ABORTED_AUTH = "aborted_auth"
 OUTCOME_FAILED = "failed"
 
 

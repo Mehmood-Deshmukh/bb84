@@ -43,6 +43,13 @@ def alice_script(outcome: str = "completed") -> list[dict]:
     events = [ev("stage", "connecting")] + key_exchange_events(qber=0.25 if outcome == "aborted_qber" else 0.0)
     if outcome == "aborted_qber":
         return events + [ev("result", "done", outcome="aborted_qber", error="QBER 25.00% >= threshold 11%")]
+    if outcome == "aborted_auth":
+        return [
+            ev("stage", "connecting"),
+            ev("stage", "authentication"),
+            ev("metrics", "authentication", auth_mode="hybrid", peer_fingerprint="1111-2222-3333-4444", peer_trust="new"),
+            ev("result", "done", outcome="aborted_auth", error="Peer authentication failed: key mismatch"),
+        ]
     return events + success_tail()
 
 
