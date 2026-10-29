@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -150,3 +153,29 @@ def test_sizes() -> None:
     ss, ct = kem_encaps(kem_pk)
     assert len(ct) == 1088  # ML-KEM-768 ciphertext length
     assert len(ss) == 32  # Shared secret length
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "cryptography.hazmat.primitives.asymmetric.mlkem",
+        "cryptography.hazmat.primitives.asymmetric.mldsa",
+    ],
+)
+def test_import_error_names_required_version(missing: str) -> None:
+    # In a fresh interpreter, make the PQC primitive unavailable and confirm pqc re-raises
+    # a clear ImportError naming the required cryptography version.
+    code = textwrap.dedent(
+        f"""
+        import sys
+        sys.modules[{missing!r}] = None
+        try:
+            import qkd.core.pqc
+        except ImportError as exc:
+            assert "cryptography>=50" in str(exc), str(exc)
+        else:
+            raise AssertionError("expected ImportError when a PQC primitive is unavailable")
+        """
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
