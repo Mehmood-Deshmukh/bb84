@@ -13,96 +13,30 @@ from __future__ import annotations
 
 import socket
 from pathlib import Path
-from typing import Any, Callable, Optional
 
 import pytest
 
 from qkd.core import pqc
 from qkd.core.config import ProtocolParams
 from qkd.services.reporting import NullReporter
-from qkd.usecases.common import AuthContext, PeerAuthError
+from qkd.usecases.common import PeerAuthError
 from qkd.usecases.eavesdrop_demo import run_eavesdrop
 from qkd.usecases.receive_file import receive_file
 from qkd.usecases.send_file import send_file
+from tests.invariants.support import (
+    AUTH_METRICS,
+    BB84_METRICS,
+    SIGNED_STAGES,
+    RecordingReporter,
+    context,
+    guarded,
+    keys,
+)
 
 PARAMS = ProtocolParams(num_qubits=64)
 # Sample every sifted bit and abort on any error, so Eve's ~25% disturbance is caught
 # with overwhelming probability at 64 qubits (an honest channel has QBER exactly 0).
 EVE_PARAMS = ProtocolParams(num_qubits=64, qber_sample_fraction=1.0, qber_threshold=0.01)
-
-AUTH_METRICS = {"auth_mode", "peer_fingerprint", "peer_trust", "handshake_ms", "auth_overhead_bytes"}
-BB84_METRICS = {"raw_qubits", "sifted_length", "sample_size", "qber", "qber_threshold", "key_bits"}
-SIGNED_STAGES = [
-    "authentication",
-    "quantum_transmission",
-    "sifting",
-    "qber_estimation",
-    "privacy_amplification",
-    "key_confirmation",
-    "file_transfer",
-]
-
-
-class PinnedVerifier:
-    """Accepts exactly one public key, like a trust store with a single pin."""
-
-    def __init__(self, expected: bytes) -> None:
-        self.expected = expected
-
-    def check(self, peer_public_key: bytes) -> str:
-        if peer_public_key != self.expected:
-            raise PeerAuthError("peer public key does not match the pinned key")
-        return "pinned"
-
-
-class RecordingReporter(NullReporter):
-    def __init__(self) -> None:
-        self.stages: list[str] = []
-        self.metric_events: list[dict[str, Any]] = []
-
-    def stage(self, stage: str) -> None:
-        self.stages.append(stage)
-
-    def metrics(self, **values: Any) -> None:
-        self.metric_events.append(values)
-
-    def merged(self) -> dict[str, Any]:
-        out: dict[str, Any] = {}
-        for event in self.metric_events:
-            out.update(event)
-        return out
-
-    def auth_metric_counts(self) -> dict[str, int]:
-        """How many metrics events carried each auth metric name."""
-        return {name: sum(name in e for e in self.metric_events) for name in AUTH_METRICS}
-
-
-@pytest.fixture(scope="module")
-def keys() -> dict[str, tuple[bytes, bytes]]:
-    return {"alice": pqc.sig_keygen(), "bob": pqc.sig_keygen()}
-
-
-def context(keys: dict[str, tuple[bytes, bytes]], role: str, mode: str, pin: Optional[bytes] = None) -> Optional[AuthContext]:
-    """role's AuthContext pinning the other peer's key (or `pin`); None for mode "none"."""
-    if mode == "none":
-        return None
-    peer = "bob" if role == "alice" else "alice"
-    pk, seed = keys[role]
-    return AuthContext(mode, pk, seed, PinnedVerifier(pin or keys[peer][0]))
-
-
-def guarded(fn: Callable[[socket.socket], Any]) -> Callable[[socket.socket], Any]:
-    """Run fn(sock) like a runner: return its result or exception, then close the connection."""
-
-    def run(sock: socket.socket) -> Any:
-        try:
-            return fn(sock)
-        except Exception as exc:  # noqa: BLE001 - asserted on by the caller
-            return exc
-        finally:
-            sock.shutdown(socket.SHUT_RDWR)
-
-    return run
 
 
 @pytest.mark.parametrize("mode", ["sign", "hybrid"])
