@@ -66,6 +66,27 @@ export const renameNode = (name) => request('/node', { method: 'PATCH', json: { 
 /** @returns {Promise<Peer[]>} */
 export const listPeers = async () => (await request('/peers')).items
 
+/** @param {string} id @returns {Promise<Peer>} */
+export const getPeer = (id) => request(`/peers/${encodeURIComponent(id)}`)
+
+/**
+ * Mark a peer's identity as verified.
+ * @param {string} id
+ * @returns {Promise<Peer>}
+ */
+export const verifyPeer = (id) =>
+  request(`/peers/${encodeURIComponent(id)}/trust`, { method: 'PUT' })
+export const verifyPeerTrust = verifyPeer
+
+/**
+ * Forget a peer's identity (resetting trust to 'new').
+ * @param {string} id
+ * @returns {Promise<Peer>}
+ */
+export const forgetPeer = (id) =>
+  request(`/peers/${encodeURIComponent(id)}/trust`, { method: 'DELETE' })
+export const forgetPeerTrust = forgetPeer
+
 /**
  * @param {{ direction?: Direction, status?: TransferStatus[] }} [filter]
  * @returns {Promise<Transfer[]>}

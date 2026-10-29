@@ -18,6 +18,31 @@ from qkd.services.api.models import TransferEvent
 MAX_EVENTS_PER_TRANSFER = 5000
 _CLOSED = None  # queue sentinel
 
+STAGE_STATUS: dict[str, str] = {
+    "authentication": "key_exchange",
+    "quantum_transmission": "key_exchange",
+    "sifting": "key_exchange",
+    "qber_estimation": "key_exchange",
+    "privacy_amplification": "key_exchange",
+    "key_confirmation": "key_exchange",
+    "file_transfer": "transferring",
+}
+
+METRIC_FIELDS: tuple[str, ...] = (
+    "raw_qubits",
+    "sifted_length",
+    "sample_size",
+    "qber",
+    "qber_threshold",
+    "key_bits",
+    "output_path",
+    "auth_mode",
+    "peer_fingerprint",
+    "peer_trust",
+    "handshake_ms",
+    "auth_overhead_bytes",
+)
+
 
 class EventBus:
     def __init__(self, max_events: int = MAX_EVENTS_PER_TRANSFER) -> None:

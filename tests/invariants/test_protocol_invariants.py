@@ -24,19 +24,20 @@ from qiskit.qasm2 import dumps
 from qkd.core.config import ProtocolParams
 from qkd.core.crypto_utils import decrypt_chunk, derive_chunk_nonce, encrypt_chunk
 from qkd.services.reporting import NullReporter
-from qkd.services.wire import forward_message, recv_json, send_json
+from qkd.services.transcript import TranscriptChannel
 from qkd.usecases import receive_file as bob
 from qkd.usecases import send_file as alice
 from qkd.usecases.receive_file import receive_file
 from qkd.usecases.send_file import send_file
+from tests.invariants.support import proxy
 
 PARAMS = ProtocolParams(num_qubits=48)
 
 
 def test_same_key_on_both_sides_without_eve(connected) -> None:
     a, b = connected(
-        lambda s: alice.run_key_exchange(s, PARAMS, NullReporter()),
-        lambda s: bob.run_key_exchange(s, PARAMS, NullReporter()),
+        lambda s: alice.run_key_exchange(TranscriptChannel(s, "alice"), PARAMS, NullReporter()),
+        lambda s: bob.run_key_exchange(TranscriptChannel(s, "bob"), PARAMS, NullReporter()),
     )
     assert not a.aborted and not b.aborted
     assert a.qber == b.qber == 0.0
@@ -79,26 +80,19 @@ def _flip_every_qubit(qasm: str) -> str:
     return dumps(qc)
 
 
-def _flipping_proxy(from_alice: socket.socket, to_bob: socket.socket) -> None:
-    """Flip every qubit, then relay the classical messages up to the QBER verdict."""
-    send_json(to_bob, [_flip_every_qubit(q) for q in recv_json(from_alice)])
-    forward_message(to_bob, from_alice)    # Bob's bases
-    forward_message(from_alice, to_bob)    # matching indices
-    forward_message(from_alice, to_bob)    # sample indices
-    forward_message(to_bob, from_alice)    # sample bits
-    forward_message(from_alice, to_bob)    # QBER verdict
-
-
 def test_tampered_channel_is_always_detected(parallel, make_file, tmp_path: Path) -> None:
+    # Flip every qubit (step "1") and relay the rest up to the QBER verdict: the
+    # ~100% QBER makes both sides abort at step 3-qber before the salt is sent.
     src = make_file("payload.bin", 1000)
     out_dir = tmp_path / "received"
     alice_end, proxy_a = socket.socketpair()
     proxy_b, bob_end = socket.socketpair()
+    flip_all = lambda qasm_list: [_flip_every_qubit(q) for q in qasm_list]  # noqa: E731
     with alice_end, proxy_a, proxy_b, bob_end:
         sent, got, _ = parallel(
             lambda: send_file(alice_end, str(src), NullReporter(), PARAMS),
             lambda: receive_file(bob_end, str(out_dir), NullReporter(), PARAMS),
-            lambda: _flipping_proxy(proxy_a, proxy_b),
+            lambda: proxy(proxy_a, proxy_b, tamper_step="1", tamper=flip_all, stop_after="3-qber"),
         )
     assert sent.qber == 1.0
     assert sent.aborted and got.key_exchange.aborted

@@ -69,7 +69,7 @@ def create_app(service: Optional[NodeService] = None, *, port: Optional[int] = N
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["Location"],
     )

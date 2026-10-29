@@ -8,7 +8,7 @@ const QBER_TICKS = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
 function stageStates(transfer) {
   const reached = transfer.stage ? STAGES.indexOf(transfer.stage) : -1
   const finished = TERMINAL_STATUSES.has(transfer.status)
-  const broke = transfer.status === 'aborted_qber' || transfer.status === 'failed'
+  const broke = transfer.status === 'aborted_qber' || transfer.status === 'aborted_auth' || transfer.status === 'failed'
   return STAGES.map((_, i) => {
     if (transfer.status === 'completed' || i < reached) return 'done'
     if (i === reached) return finished ? (broke ? 'failed' : 'stopped') : 'current'
@@ -37,12 +37,12 @@ const STAGE_STATE_TEXT = {
 function StageSequence({ transfer }) {
   const states = stageStates(transfer)
   return (
-    <ol className="grid grid-cols-2 gap-x-3 gap-y-3 sm:grid-cols-3 xl:grid-cols-6">
+    <ol className="grid grid-cols-2 gap-x-3 gap-y-3 sm:grid-cols-4 xl:grid-cols-8">
       {STAGES.map((stage, i) => (
         <li key={stage} aria-current={states[i] === 'current' ? 'step' : undefined}>
           <div className={`mb-1.5 h-[3px] ${STAGE_BAR[states[i]]}`} />
           <span className={`text-small ${states[i] === 'upcoming' || states[i] === 'skipped' ? 'text-ink-2' : ''} ${states[i] === 'failed' ? 'text-danger' : ''}`}>
-            <span className="font-mono">{i + 1}</span> {STAGE_LABEL[stage]}
+            <span className="font-mono">{i + 1}</span> {STAGE_LABEL[stage] || stage}
             <span className="sr-only"> ({STAGE_STATE_TEXT[states[i]]})</span>
           </span>
         </li>
@@ -71,7 +71,19 @@ function FunnelRow({ label, value, of, note, barClass }) {
 function KeyFunnel({ transfer }) {
   const { raw_qubits: raw, sifted_length: sifted, sample_size: sample, key_bits: keyBits } = transfer
   const kept = sifted != null && sample != null ? sifted - sample : null
-  const aborted = transfer.status === 'aborted_qber'
+  const abortedQber = transfer.status === 'aborted_qber'
+  const abortedAuth = transfer.status === 'aborted_auth'
+  const aborted = abortedQber || abortedAuth
+
+  let note = null
+  if (abortedAuth) {
+    note = 'No key was derived: classical channel authentication failed'
+  } else if (abortedQber) {
+    note = 'No key was derived: the exchange stopped at the QBER check'
+  } else if (keyBits) {
+    note = `SHA-256 with a random salt gives the ${keyBits}-bit AES key (via HKDF)`
+  }
+
   return (
     <section aria-labelledby="funnel-heading" className="space-y-3">
       <h3 id="funnel-heading" className="font-medium">Key material</h3>
@@ -96,9 +108,7 @@ function KeyFunnel({ transfer }) {
           value={kept}
           of={raw}
           barClass={aborted ? 'bg-ink-2' : 'bg-accent'}
-          note={aborted
-            ? 'No key was derived: the exchange stopped at the QBER check'
-            : keyBits ? `SHA-256 with a random salt gives the ${keyBits}-bit AES key (via HKDF)` : null}
+          note={note}
         />
       </dl>
       {kept != null && keyBits && kept < keyBits ? (
@@ -120,7 +130,9 @@ function QberScale({ transfer }) {
   const differing = measured && sample ? Math.round(qber * sample) : null
 
   const summary = !measured
-    ? 'Measured after sifting, on a sample of the matching bits.'
+    ? transfer.status === 'aborted_auth'
+      ? 'Authentication failed before quantum transmission took place.'
+      : 'Measured after sifting, on a sample of the matching bits.'
     : `${differing} of ${sample} revealed bits differ. ${
       above
         ? `That is at or above the ${formatPercent(threshold, 0)} threshold, so both sides aborted and no file was sent.`

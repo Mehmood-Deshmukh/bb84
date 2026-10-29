@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { TERMINAL_STATUSES } from '../api/types'
-import { formatBytes } from '../lib/format'
+import { STAGE_LABEL, formatBytes } from '../lib/format'
 import LiveLog from './LiveLog'
 import ProtocolView from './ProtocolView'
 import StatusLabel from './StatusLabel'
@@ -57,6 +57,63 @@ function waitingNote(transfer) {
     : `${transfer.peer.name} wants to send you this file. Nothing is received until you accept.`
 }
 
+/** Prominent result panel displayed when a transfer aborts due to authentication / impersonation failure. */
+function ImpersonationAlert({ transfer }) {
+  const stageName = transfer.stage ? (STAGE_LABEL[transfer.stage] || transfer.stage) : 'Authentication'
+
+  return (
+    <section role="alert" aria-labelledby="impersonation-heading" className="rounded-sm border-2 border-danger bg-danger/10 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-danger font-semibold text-section">
+        <svg width="22" height="22" viewBox="0 0 20 20" fill="none" className="shrink-0" aria-hidden="true">
+          <path d="M10 2 17 5.5v5.5c0 4.2-3 7-7 8.5C6 18 3 15.2 3 11V5.5L10 2z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+          <path d="M10 6.5v4.5M10 14h.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+        <h3 id="impersonation-heading">Impersonation Detected — Transfer Aborted</h3>
+      </div>
+
+      <p className="text-small text-ink">
+        Cryptographic authentication failed during the <strong>{stageName}</strong> stage.
+        An untrusted peer or active adversary attempted to compromise the classical channel.
+        No quantum key was established and no file data was transferred.
+      </p>
+
+      {transfer.error ? (
+        <div className="rounded-sm border border-danger/30 bg-surface px-3 py-2 text-small">
+          <span className="font-medium text-danger">Failure Reason: </span>
+          <span className="font-mono text-ink select-all">{transfer.error}</span>
+        </div>
+      ) : null}
+
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-danger/20 pt-2.5 text-fine text-ink-2 sm:grid-cols-4">
+        <div>
+          <dt className="font-medium text-ink-2">Failed Stage</dt>
+          <dd className="font-mono text-ink">{transfer.stage ?? 'authentication'}</dd>
+        </div>
+        {transfer.auth_mode ? (
+          <div>
+            <dt className="font-medium text-ink-2">Auth Mode</dt>
+            <dd className="font-mono text-ink uppercase">{transfer.auth_mode}</dd>
+          </div>
+        ) : null}
+        {transfer.peer_trust ? (
+          <div>
+            <dt className="font-medium text-ink-2">Peer Trust</dt>
+            <dd className="font-mono text-ink capitalize">{transfer.peer_trust}</dd>
+          </div>
+        ) : null}
+        {transfer.peer_fingerprint ? (
+          <div className="col-span-2 sm:col-span-1">
+            <dt className="font-medium text-ink-2">Peer Fingerprint</dt>
+            <dd className="font-mono text-ink truncate select-all" title={transfer.peer_fingerprint}>
+              {transfer.peer_fingerprint}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+    </section>
+  )
+}
+
 export default function TransferPanel({ transfer, events, onRespond, onCancel, busy, actionError }) {
   if (!transfer) {
     return (
@@ -90,7 +147,10 @@ export default function TransferPanel({ transfer, events, onRespond, onCancel, b
           <StatusLabel status={transfer.status} direction={transfer.direction} />
         </p>
         {note ? <p className="text-ink-2">{note}</p> : null}
-        {transfer.error && !['cancelled', 'rejected', 'aborted_qber'].includes(transfer.status) ? (
+        {transfer.status === 'aborted_auth' ? (
+          <ImpersonationAlert transfer={transfer} />
+        ) : null}
+        {transfer.error && !['cancelled', 'rejected', 'aborted_qber', 'aborted_auth'].includes(transfer.status) ? (
           <p className="text-small text-danger">{transfer.error}</p>
         ) : null}
         {transfer.output_path ? (

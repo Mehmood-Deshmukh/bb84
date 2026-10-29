@@ -37,6 +37,11 @@ export default function HistoryTable({ entries }) {
                 </td>
                 <td className="col-start-2 sm:py-2 sm:align-top">
                   <StatusLabel status={e.status} />
+                  {e.status === 'aborted_auth' && e.error ? (
+                    <span className="mt-0.5 block max-w-xs truncate text-fine text-danger" title={e.error}>
+                      {e.error}
+                    </span>
+                  ) : null}
                 </td>
               </tr>
             ))}

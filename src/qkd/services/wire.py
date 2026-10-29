@@ -41,14 +41,24 @@ def recv_bytes(sock: socket.socket) -> bytes:
     return recv_exact(sock, length)
 
 
+def encode_json(data: Any) -> bytes:
+    """The payload bytes send_json puts on the wire for data."""
+    return json.dumps(data).encode()
+
+
+def decode_json(payload: bytes) -> Any:
+    """Parse a payload produced by encode_json."""
+    return json.loads(payload.decode())
+
+
 def send_json(sock: socket.socket, data: Any) -> None:
     """Send a JSON-serialisable value with a 4-byte length prefix."""
-    send_bytes(sock, json.dumps(data).encode())
+    send_bytes(sock, encode_json(data))
 
 
 def recv_json(sock: socket.socket) -> Any:
     """Receive one length-prefixed JSON message."""
-    return json.loads(recv_bytes(sock).decode())
+    return decode_json(recv_bytes(sock))
 
 
 def forward_message(src: socket.socket, dst: socket.socket) -> bytes:

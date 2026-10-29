@@ -3,13 +3,17 @@ Chunked AES-256-GCM file streaming (the final phase of the wire protocol).
 
 Sender: one JSON metadata message, then one length-prefixed `tag(16B) + ciphertext`
 message per chunk. Chunk i is encrypted with nonce = base_nonce(8B) || i(4B).
+Every chunk carries SHA-256 of the canonical metadata JSON as GCM AAD, so a changed
+metadata message fails authentication on chunk 0.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from qkd.core.config import CHUNK_SIZE
@@ -29,6 +33,8 @@ class FileMeta:
     chunk_size: int
     num_chunks: int
     base_nonce: bytes
+    # metadata_aad() of the message this was parsed from (set by from_message)
+    aad: bytes = field(default=b"", compare=False, repr=False)
 
     def to_message(self) -> dict:
         return {
@@ -47,7 +53,13 @@ class FileMeta:
             chunk_size=msg["chunk_size"],
             num_chunks=msg["num_chunks"],
             base_nonce=bytes.fromhex(msg["base_nonce"]),
+            aad=metadata_aad(msg),
         )
+
+
+def metadata_aad(msg: dict) -> bytes:
+    """SHA-256 of the canonical JSON (sorted keys, compact, UTF-8) of a metadata message."""
+    return hashlib.sha256(json.dumps(msg, sort_keys=True, separators=(",", ":")).encode("utf-8")).digest()
 
 
 def describe_file(filepath: str, chunk_size: int = CHUNK_SIZE) -> FileMeta:
@@ -70,12 +82,14 @@ def send_encrypted_file(
     on_progress: Optional[ProgressCallback] = None,
 ) -> None:
     """Send the metadata message followed by every encrypted chunk."""
-    send_json(sock, meta.to_message())
+    msg = meta.to_message()
+    send_json(sock, msg)
+    aad = metadata_aad(msg)
     sent = 0
     with open(filepath, "rb") as f:
         for i in range(meta.num_chunks):
             plaintext = f.read(meta.chunk_size)
-            ciphertext, tag = encrypt_chunk(plaintext, aes_key, derive_chunk_nonce(meta.base_nonce, i))
+            ciphertext, tag = encrypt_chunk(plaintext, aes_key, derive_chunk_nonce(meta.base_nonce, i), aad)
             send_bytes(sock, tag + ciphertext)
             sent += len(plaintext)
             if on_progress:
@@ -96,8 +110,9 @@ def receive_encrypted_file(
     """
     Receive and decrypt every chunk into output_path. Returns bytes written.
 
-    Raises cryptography.exceptions.InvalidTag if any chunk fails authentication.
-    The partial output file is removed in that case.
+    Raises cryptography.exceptions.InvalidTag if any chunk fails authentication,
+    including when meta.aad does not match the sender's metadata. The partial
+    output file is removed in that case.
     """
     written = 0
     try:
@@ -105,7 +120,7 @@ def receive_encrypted_file(
             for i in range(meta.num_chunks):
                 data = recv_bytes(sock)
                 tag, ciphertext = data[:TAG_SIZE], data[TAG_SIZE:]
-                plaintext = decrypt_chunk(ciphertext, aes_key, derive_chunk_nonce(meta.base_nonce, i), tag)
+                plaintext = decrypt_chunk(ciphertext, aes_key, derive_chunk_nonce(meta.base_nonce, i), tag, meta.aad)
                 f.write(plaintext)
                 written += len(plaintext)
                 if on_progress:

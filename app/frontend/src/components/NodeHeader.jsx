@@ -49,6 +49,20 @@ function RenameForm({ initial, onSave, onClose }) {
 
 export default function NodeHeader({ node, busy, error, onRename }) {
   const [renaming, setRenaming] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const copyFingerprint = async () => {
+    if (!node?.fingerprint) return
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(node.fingerprint)
+      }
+    } catch {
+      // Ignore clipboard write failure
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
 
   return (
     <header className="border-b border-rule bg-surface">
@@ -70,7 +84,7 @@ export default function NodeHeader({ node, busy, error, onRename }) {
           </div>
         )}
         {node ? (
-          <dl className="flex flex-wrap gap-x-6 gap-y-1 text-small text-ink-2">
+          <dl className="flex flex-wrap items-center gap-x-6 gap-y-1 text-small text-ink-2">
             <div className="flex gap-1.5">
               <dt>Address</dt>
               <dd translate="no" className="font-mono text-ink">{node.host}:{node.port}</dd>
@@ -79,6 +93,22 @@ export default function NodeHeader({ node, busy, error, onRename }) {
               <dt>Status</dt>
               <dd className="text-ink">{busy ? 'Running a transfer' : 'Idle'}</dd>
             </div>
+            {node.fingerprint ? (
+              <div className="flex items-center gap-1.5">
+                <dt>Fingerprint</dt>
+                <dd translate="no" className="flex items-center gap-1.5 font-mono text-ink">
+                  <span className="select-all break-all" title={node.fingerprint}>{node.fingerprint}</span>
+                  <button
+                    type="button"
+                    onClick={copyFingerprint}
+                    aria-label="Copy node fingerprint to clipboard"
+                    className="inline-flex items-center rounded border border-rule bg-paper px-1.5 py-0.5 text-fine text-ink hover:bg-well"
+                  >
+                    {copied ? <span className="font-medium text-accent">Copied!</span> : <span>Copy</span>}
+                  </button>
+                </dd>
+              </div>
+            ) : null}
           </dl>
         ) : null}
         <p className="text-small text-ink-2 sm:ml-auto">BB84 key exchange, AES-256-GCM transfer</p>

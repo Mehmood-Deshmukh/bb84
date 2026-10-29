@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import socket
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from qkd.services.file_stream import (
     received_path,
     send_encrypted_file,
 )
+from qkd.services.wire import forward_message, recv_json, send_json
 
 MB = 1024 * 1024
 
@@ -99,3 +101,35 @@ def test_received_path_strips_directories(tmp_path: Path) -> None:
 def test_metadata_counts_chunks(make_file) -> None:
     meta = describe_file(str(make_file("x.bin", 2 * CHUNK_SIZE + 5)))
     assert (meta.total_size, meta.num_chunks, meta.chunk_size, len(meta.base_nonce)) == (2 * CHUNK_SIZE + 5, 3, CHUNK_SIZE, 8)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda msg: {**msg, "filename": "other.bin"},
+        # Same bytes after FileMeta parsing, so only an AAD over the raw message catches it
+        lambda msg: {**msg, "base_nonce": msg["base_nonce"].upper()},
+    ],
+    ids=["filename", "base_nonce_uppercase"],
+)
+def test_changed_metadata_fails_on_chunk_zero(tamper, make_file, tmp_path: Path, aes_key: bytes) -> None:
+    src = make_file("secret.bin", 300)
+    meta = replace(describe_file(str(src), chunk_size=100), base_nonce=bytes.fromhex("abababababababab"))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    sender, relay_in = socket.socketpair()
+    relay_out, receiver = socket.socketpair()
+    with sender, relay_in, relay_out, receiver:
+        # The file is small enough to sit in the socket buffers, so no threads are needed
+        send_encrypted_file(sender, str(src), aes_key, meta)
+        send_json(relay_out, tamper(recv_json(relay_in)))
+        for _ in range(meta.num_chunks):
+            forward_message(relay_in, relay_out)
+
+        got = receive_file_meta(receiver)
+        out = Path(received_path(str(out_dir), got.filename))
+        progress: list[int] = []
+        with pytest.raises(InvalidTag):
+            receive_encrypted_file(receiver, got, str(out), aes_key, lambda done, *_: progress.append(done))
+    assert progress == []
+    assert list(out_dir.iterdir()) == []

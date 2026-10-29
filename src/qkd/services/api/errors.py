@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from qkd.services.api.models import ErrorDetail, ErrorResponse
-from qkd.services.node import InvalidRequest, LaunchFailed, UnknownPeer
+from qkd.services.node import FingerprintMismatch, InvalidRequest, LaunchFailed, UnknownPeer
 from qkd.services.peer_client import PeerError
 from qkd.services.transfer_store import InvalidTransition, TransferExists, TransferNotFound
 
@@ -36,6 +36,7 @@ _DOMAIN_ERRORS: dict[type[Exception], tuple[int, str]] = {
     UnknownPeer: (422, "unknown_peer"),
     InvalidTransition: (409, "invalid_transition"),
     TransferExists: (409, "transfer_exists"),
+    FingerprintMismatch: (409, "fingerprint_mismatch"),
     InvalidRequest: (422, "invalid_request"),
     PeerError: (502, "peer_unreachable"),
     LaunchFailed: (500, "launch_failed"),

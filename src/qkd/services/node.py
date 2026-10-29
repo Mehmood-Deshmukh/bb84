@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Optional
 
+from qkd.core.config import IDENTITY_DIR, KNOWN_PEERS_FILE
 from qkd.services.api.models import (
     Direction,
     HistoryEntry,
@@ -40,6 +41,7 @@ from qkd.services.api.models import (
 from qkd.services.discovery import NodeIdentity, PeerDirectory, PeerInfo
 from qkd.services.events import EventBus
 from qkd.services.history import HistoryStore
+from qkd.services.identity import Identity, TrustStore, load_or_create_identity
 from qkd.services.peer_client import PeerClient, PeerError
 from qkd.services.process_runner import ProtocolLauncher, RunningProcess
 from qkd.services.transfer_store import ACTIVE, TERMINAL, InvalidTransition, TransferRepository, path_to
@@ -49,18 +51,42 @@ S = TransferStatus
 
 # Protocol stage reported by alice/bob -> transfer status
 STAGE_STATUS = {
+    "authentication": S.key_exchange,
     "quantum_transmission": S.key_exchange,
     "sifting": S.key_exchange,
     "qber_estimation": S.key_exchange,
     "privacy_amplification": S.key_exchange,
+    "key_confirmation": S.key_exchange,
     "file_transfer": S.transferring,
 }
-OUTCOME_STATUS = {"completed": S.completed, "aborted_qber": S.aborted_qber, "failed": S.failed}
-METRIC_FIELDS = ("raw_qubits", "sifted_length", "sample_size", "qber", "qber_threshold", "key_bits", "output_path")
+OUTCOME_STATUS = {
+    "completed": S.completed,
+    "aborted_qber": S.aborted_qber,
+    "aborted_auth": S.aborted_auth,
+    "failed": S.failed,
+}
+METRIC_FIELDS = (
+    "raw_qubits",
+    "sifted_length",
+    "sample_size",
+    "qber",
+    "qber_threshold",
+    "key_bits",
+    "output_path",
+    "auth_mode",
+    "peer_fingerprint",
+    "peer_trust",
+    "handshake_ms",
+    "auth_overhead_bytes",
+)
 
 
 class UnknownPeer(Exception):
     pass
+
+
+class FingerprintMismatch(Exception):
+    """Raised when an incoming transfer offer has a sender fingerprint differing from mDNS."""
 
 
 class InvalidRequest(Exception):
@@ -96,6 +122,10 @@ class NodeService:
         upload_dir: Optional[str] = None,
         version: str = "0",
         listen_timeout: float = 15.0,
+        pqc_identity: Optional[Identity] = None,
+        identity_dir: Optional[str | Path] = None,
+        trust_store: Optional[TrustStore] = None,
+        known_peers_file: Optional[str | Path] = None,
     ) -> None:
         self.identity = identity
         self.repo = repo
@@ -109,10 +139,20 @@ class NodeService:
         self.version = version
         self.listen_timeout = listen_timeout
         self._runtime: dict[str, _Runtime] = {}
+        self._identity_dir = identity_dir
+        if pqc_identity is not None:
+            self.pqc_identity = pqc_identity
+        else:
+            self.pqc_identity = load_or_create_identity(Path(identity_dir or IDENTITY_DIR))
+        if not self.identity.fingerprint:
+            self.identity.fingerprint = self.pqc_identity.fingerprint
+        self.trust_store = trust_store or TrustStore(Path(known_peers_file or KNOWN_PEERS_FILE))
 
     # ── lifecycle ──────────────────────────────────────────────
 
     async def start(self) -> None:
+        if not self.identity.fingerprint:
+            self.identity.fingerprint = self.pqc_identity.fingerprint
         await self.directory.start(self.identity)
 
     async def stop(self) -> None:
@@ -125,25 +165,78 @@ class NodeService:
 
     def node(self) -> Node:
         busy = bool(self.repo.list(statuses=ACTIVE))
-        return Node(id=self.identity.id, name=self.identity.name, host=self.identity.host,
-                    port=self.identity.port, status="busy" if busy else "idle", version=self.version)
+        return Node(
+            id=self.identity.id,
+            name=self.identity.name,
+            host=self.identity.host,
+            port=self.identity.port,
+            status="busy" if busy else "idle",
+            version=self.version,
+            fingerprint=self.pqc_identity.fingerprint,
+        )
 
     async def rename(self, name: str) -> Node:
         self.identity.name = name.strip()
         await self.directory.advertise(self.identity)
         return self.node()
 
+    def _peer_trust(self, fp: str) -> str:
+        if not fp:
+            return "new"
+        rec = self.trust_store.get(fp)
+        if rec is None:
+            return "new"
+        return "verified" if rec.verified else "pinned"
+
     async def list_peers(self) -> list[Peer]:
         infos = self.directory.peers()
         reachable = await asyncio.gather(*(self.peers.probe(p.host, p.port) for p in infos))
-        return [Peer(id=p.id, name=p.name, host=p.host, port=p.port, reachable=ok) for p, ok in zip(infos, reachable)]
+        return [
+            Peer(
+                id=p.id,
+                name=p.name,
+                host=p.host,
+                port=p.port,
+                reachable=ok,
+                fingerprint=p.fingerprint,
+                trust=self._peer_trust(p.fingerprint),
+            )
+            for p, ok in zip(infos, reachable)
+        ]
 
     async def get_peer(self, peer_id: str) -> Peer:
         info = self._find_peer(peer_id)
         if info is None:
             raise UnknownPeer(peer_id)
-        return Peer(id=info.id, name=info.name, host=info.host, port=info.port,
-                    reachable=await self.peers.probe(info.host, info.port))
+        return Peer(
+            id=info.id,
+            name=info.name,
+            host=info.host,
+            port=info.port,
+            reachable=await self.peers.probe(info.host, info.port),
+            fingerprint=info.fingerprint,
+            trust=self._peer_trust(info.fingerprint),
+        )
+
+    async def set_peer_trust(self, peer_id: str, verified: bool = True) -> Peer:
+        info = self._find_peer(peer_id)
+        if info is None:
+            raise UnknownPeer(peer_id)
+        if info.fingerprint:
+            rec = self.trust_store.get(info.fingerprint)
+            if rec is None:
+                self.trust_store.add(info.fingerprint, name=info.name, verified=verified)
+            else:
+                self.trust_store.set_verified(info.fingerprint, verified=verified)
+        return await self.get_peer(peer_id)
+
+    async def delete_peer_trust(self, peer_id: str) -> Peer:
+        info = self._find_peer(peer_id)
+        if info is None:
+            raise UnknownPeer(peer_id)
+        if info.fingerprint:
+            self.trust_store.forget(info.fingerprint)
+        return await self.get_peer(peer_id)
 
     def _find_peer(self, peer_id: str) -> Optional[PeerInfo]:
         return next((p for p in self.directory.peers() if p.id == peer_id), None)
@@ -179,7 +272,13 @@ class NodeService:
         self._runtime[transfer_id] = _Runtime(upload_path=path)
         self._publish_status(transfer)
 
-        offer = IncomingTransferRequest(id=transfer_id, filename=name, file_size=transfer.file_size, sender=self._self_ref())
+        offer = IncomingTransferRequest(
+            id=transfer_id,
+            filename=name,
+            file_size=transfer.file_size,
+            sender=self._self_ref(),
+            sender_fingerprint=self.pqc_identity.fingerprint,
+        )
         try:
             await self.peers.offer_transfer(peer.host, peer.port, offer)
         except PeerError as exc:
@@ -189,6 +288,14 @@ class NodeService:
 
     def register_incoming(self, request: IncomingTransferRequest) -> Transfer:
         """Record a transfer offered by another node. Raises TransferExists for a duplicate id."""
+        peer = self._find_peer(request.sender.id)
+        if peer is not None and peer.fingerprint:
+            if request.sender_fingerprint != peer.fingerprint:
+                raise FingerprintMismatch(
+                    f"Offer sender fingerprint {request.sender_fingerprint!r} does not match "
+                    f"advertised fingerprint {peer.fingerprint!r} for peer '{request.sender.id}'"
+                )
+
         transfer = Transfer(id=request.id, direction=Direction.incoming, status=S.pending,
                             filename=os.path.basename(request.filename), file_size=request.file_size,
                             peer=request.sender)
@@ -243,7 +350,11 @@ class NodeService:
         self._move(transfer.id, S.accepted)
         rt = self._runtime.setdefault(transfer.id, _Runtime())
         rt.listening = asyncio.get_running_loop().create_future()
-        await self._launch(transfer.id, "bob", ["--port", "0", "--output-dir", self.output_dir, "--transfer-id", transfer.id])
+        args = ["--port", "0", "--output-dir", self.output_dir, "--transfer-id", transfer.id]
+        peer = self._find_peer(transfer.peer.id)
+        if peer and peer.fingerprint:
+            args.extend(["--peer-fingerprint", peer.fingerprint])
+        await self._launch(transfer.id, "bob", args)
 
         try:
             port = await asyncio.wait_for(asyncio.shield(rt.listening), self.listen_timeout)
@@ -271,8 +382,12 @@ class NodeService:
             self._fail(transfer.id, "The uploaded file is no longer available")
             raise LaunchFailed("The uploaded file is no longer available")
         self._move(transfer.id, S.accepted)
-        await self._launch(transfer.id, "alice", [str(rt.upload_path), "--host", transfer.peer.host,
-                                                  "--port", str(receiver_port), "--transfer-id", transfer.id])
+        args = [str(rt.upload_path), "--host", transfer.peer.host,
+                "--port", str(receiver_port), "--transfer-id", transfer.id]
+        peer = self._find_peer(transfer.peer.id)
+        if peer and peer.fingerprint:
+            args.extend(["--peer-fingerprint", peer.fingerprint])
+        await self._launch(transfer.id, "alice", args)
         return self.repo.get(transfer.id)
 
     # ── runner processes and their events ──────────────────────
@@ -365,6 +480,7 @@ class NodeService:
                 id=transfer.id, finished_at=utcnow(), direction=transfer.direction, status=transfer.status,
                 filename=transfer.filename, file_size=transfer.file_size, peer_name=transfer.peer.name,
                 peer_host=transfer.peer.host, qber=transfer.qber, key_bits=transfer.key_bits, error=transfer.error,
+                auth_mode=transfer.auth_mode, peer_fingerprint=transfer.peer_fingerprint, peer_trust=transfer.peer_trust,
             ))
         except OSError as exc:
             log.warning("Could not write history: %s", exc)

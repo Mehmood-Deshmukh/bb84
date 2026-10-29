@@ -3,9 +3,10 @@
 // See http://127.0.0.1:8000/docs for the live schema.
 
 /**
- * @typedef {'pending'|'accepted'|'key_exchange'|'transferring'|'completed'|'rejected'|'aborted_qber'|'failed'|'cancelled'} TransferStatus
+ * @typedef {'pending'|'accepted'|'key_exchange'|'transferring'|'completed'|'rejected'|'aborted_qber'|'aborted_auth'|'failed'|'cancelled'} TransferStatus
  * @typedef {'outgoing'|'incoming'} Direction
- * @typedef {'connecting'|'quantum_transmission'|'sifting'|'qber_estimation'|'privacy_amplification'|'file_transfer'|'done'} Stage
+ * @typedef {'connecting'|'authentication'|'quantum_transmission'|'sifting'|'qber_estimation'|'privacy_amplification'|'key_confirmation'|'file_transfer'|'done'} Stage
+ * @typedef {'new'|'pinned'|'verified'} PeerTrust
  *
  * @typedef {object} PeerRef
  * @property {string} id
@@ -35,6 +36,11 @@
  * @property {number|null} qber
  * @property {number|null} qber_threshold
  * @property {number|null} key_bits
+ * @property {string|null} [auth_mode]
+ * @property {string|null} [peer_fingerprint]
+ * @property {PeerTrust|null} [peer_trust]
+ * @property {number|null} [handshake_ms]
+ * @property {number|null} [auth_overhead_bytes]
  * @property {TransferProgress|null} progress
  * @property {string|null} output_path
  * @property {string|null} error
@@ -46,6 +52,7 @@
  * @property {number} port
  * @property {'idle'|'busy'} status
  * @property {string} version
+ * @property {string|null} [fingerprint]
  *
  * @typedef {object} Peer
  * @property {string} id
@@ -53,6 +60,8 @@
  * @property {string} host
  * @property {number} port
  * @property {boolean} reachable
+ * @property {string|null} [fingerprint]
+ * @property {PeerTrust|null} [trust]
  *
  * @typedef {object} HistoryEntry
  * @property {string} id
@@ -65,6 +74,9 @@
  * @property {string} peer_host
  * @property {number|null} qber
  * @property {number|null} key_bits
+ * @property {string|null} [auth_mode]
+ * @property {string|null} [peer_fingerprint]
+ * @property {PeerTrust|null} [peer_trust]
  * @property {string|null} error
  *
  * @typedef {object} TransferEvent
@@ -77,7 +89,7 @@
  */
 
 /** @type {ReadonlySet<TransferStatus>} */
-export const TERMINAL_STATUSES = new Set(['completed', 'rejected', 'aborted_qber', 'failed', 'cancelled'])
+export const TERMINAL_STATUSES = new Set(['completed', 'rejected', 'aborted_qber', 'aborted_auth', 'failed', 'cancelled'])
 
 /** @type {ReadonlySet<TransferStatus>} */
 export const ACTIVE_STATUSES = new Set(['accepted', 'key_exchange', 'transferring'])
@@ -85,9 +97,11 @@ export const ACTIVE_STATUSES = new Set(['accepted', 'key_exchange', 'transferrin
 /** Protocol stages in order, as alice/bob report them. @type {ReadonlyArray<Stage>} */
 export const STAGES = [
   'connecting',
+  'authentication',
   'quantum_transmission',
   'sifting',
   'qber_estimation',
   'privacy_amplification',
+  'key_confirmation',
   'file_transfer',
 ]
