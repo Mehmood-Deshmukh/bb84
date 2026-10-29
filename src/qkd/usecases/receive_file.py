@@ -18,7 +18,7 @@ from qkd.core.quantum_channel import measure_qubits
 from qkd.services.file_stream import receive_encrypted_file, receive_file_meta, received_path
 from qkd.services.reporting import Reporter
 from qkd.services.wire import recv_json, send_json
-from qkd.usecases.common import KeyExchangeResult, report_qber_verdict, report_summary
+from qkd.usecases.common import AuthContext, KeyExchangeResult, report_qber_verdict, report_summary
 
 
 @dataclass(frozen=True)
@@ -107,6 +107,7 @@ def receive_file(
     output_dir: str,
     reporter: Reporter,
     params: ProtocolParams = ProtocolParams(),
+    auth: AuthContext | None = None,
 ) -> ReceiveResult:
     """
     Run the key exchange and, unless it aborts, receive the file into output_dir.

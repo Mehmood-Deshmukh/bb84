@@ -68,7 +68,7 @@ Workflows never print. They call a `Reporter` (`section/info/success/warning/err
 `src/api/client.js` is the only module that calls the backend (JSDoc-typed against `src/api/types.js`); components get data through `src/hooks/` (polling + `useTransferEvents` for SSE). Base URL from `VITE_API_BASE_URL` (default `http://127.0.0.1:8000`). Components are in `src/components/`; `ProtocolView` renders the stage sequence, key funnel, QBER scale, and chunk progress from the transfer resource. Theme tokens (palette, type scale) are in `src/index.css` (`@theme`); fonts are bundled with `@fontsource`.
 
 ## Configuration
-Every tunable is in `src/qkd/core/config.py` and can be overridden with `QKD_<NAME>` (read once at import; tests check this in subprocesses): `NUM_QUBITS`, `QBER_SAMPLE_FRACTION`, `QBER_THRESHOLD`, `FINAL_KEY_BITS`, `CHUNK_SIZE`, `ALICE_HOST`, `BOB_PORT`, `EVE_PORT`, `BUFFER_SIZE`, `OUTPUT_DIR`, `HISTORY_FILE`, `NODE_PORT` (falls back to `PORT`), `NODE_NAME`, `NODE_HOST`. `ProtocolParams` bundles the per-run protocol values and is what the use cases take.
+Every tunable is in `src/qkd/core/config.py` and can be overridden with `QKD_<NAME>` (read once at import; tests check this in subprocesses): `NUM_QUBITS`, `QBER_SAMPLE_FRACTION`, `QBER_THRESHOLD`, `FINAL_KEY_BITS`, `CHUNK_SIZE`, `ALICE_HOST`, `BOB_PORT`, `EVE_PORT`, `BUFFER_SIZE`, `OUTPUT_DIR`, `HISTORY_FILE`, `NODE_PORT` (falls back to `PORT`), `NODE_NAME`, `NODE_HOST`, `AUTH_MODE`, `IDENTITY_DIR`, `KNOWN_PEERS_FILE`, `TOFU`. `ProtocolParams` bundles the per-run protocol values and is what the use cases take.
 
 ## Git hygiene
 `received/`, `history.json`, `experiments/results/`, and `experiments/figures/` are run outputs and gitignored. `literature/` and `reports/` hold PDFs only.
