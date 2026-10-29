@@ -108,7 +108,6 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     salt, key = privacy_amplification(discard_indices(sifted, sample_indices))
     reporter.success(f"Final key: {len(key) * 8}-bit AES key derived")
     reporter.metrics(key_bits=len(key) * 8)
-    reporter.info(f"Key (hex): {key.hex()[:32]}...")
     channel.send_json({"salt": salt.hex()})
     return KeyExchangeResult(key=key, **result)
 
