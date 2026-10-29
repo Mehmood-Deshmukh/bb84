@@ -45,6 +45,61 @@ def derive_aes_key(raw_key: bytes, info: bytes = b"bb84-qkd-file-transfer") -> b
     return hkdf.derive(raw_key)
 
 
+def derive_session_key(
+    qkd_key: bytes,
+    kem_ss: bytes | None,
+    transcript_hash: bytes,
+    mode: str,
+) -> bytes:
+    """
+    Derive a 256-bit AES session key using HKDF-SHA256 based on the authentication mode.
+
+    Modes:
+      - 'hybrid': Combines QKD key and ML-KEM-768 shared secret:
+          ikm = qkd_key || kem_ss, salt = transcript_hash, info = b"bb84-mlkem768-hybrid-v1"
+      - 'sign': Uses QKD key only (KEM secret omitted; kem_ss may be None):
+          ikm = qkd_key, salt = transcript_hash, info = b"bb84-mlkem768-hybrid-v1"
+      - 'none': Returns derive_aes_key(qkd_key) for backwards compatibility.
+
+    Args:
+        qkd_key: 32-byte QKD shared key from privacy amplification.
+        kem_ss: 32-byte ML-KEM-768 shared secret (required for 'hybrid' mode).
+        transcript_hash: 32-byte SHA-256 digest of the classical channel transcript.
+        mode: Authentication mode ('hybrid', 'sign', or 'none').
+
+    Returns:
+        32-byte (256-bit) AES session key.
+
+    Raises:
+        ValueError: If mode is unknown or if kem_ss is None in 'hybrid' mode.
+    """
+    norm_mode = mode.lower()
+    if norm_mode == "hybrid":
+        if kem_ss is None:
+            raise ValueError("kem_ss is required in hybrid mode")
+        ikm = qkd_key + kem_ss
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=transcript_hash,
+            info=b"bb84-mlkem768-hybrid-v1",
+        )
+        return hkdf.derive(ikm)
+    elif norm_mode == "sign":
+        ikm = qkd_key
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=transcript_hash,
+            info=b"bb84-mlkem768-hybrid-v1",
+        )
+        return hkdf.derive(ikm)
+    elif norm_mode == "none":
+        return derive_aes_key(qkd_key)
+    else:
+        raise ValueError(f"Invalid mode: {mode!r}. Allowed: none, sign, hybrid")
+
+
 def encrypt_file(filepath: str, key: bytes) -> tuple[bytes, bytes, bytes, str]:
     """
     Encrypt a file using AES-256-GCM.
@@ -139,7 +194,12 @@ def derive_chunk_nonce(base_nonce: bytes, chunk_index: int) -> bytes:
     return base_nonce + struct.pack(">I", chunk_index)
 
 
-def encrypt_chunk(plaintext: bytes, key: bytes, nonce: bytes) -> tuple[bytes, bytes]:
+def encrypt_chunk(
+    plaintext: bytes,
+    key: bytes,
+    nonce: bytes,
+    aad: bytes | None = None,
+) -> tuple[bytes, bytes]:
     """
     Encrypt a single data chunk using AES-256-GCM.
 
@@ -150,18 +210,25 @@ def encrypt_chunk(plaintext: bytes, key: bytes, nonce: bytes) -> tuple[bytes, by
         plaintext: Raw data chunk
         key: 256-bit AES key
         nonce: 12-byte unique nonce for this chunk
+        aad: Optional additional authenticated data (e.g. metadata hash)
 
     Returns:
         (ciphertext, tag) where tag is the 16-byte GCM authentication tag
     """
     aesgcm = AESGCM(key)
-    ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext, None)
+    ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext, aad)
     ciphertext = ciphertext_with_tag[:-16]
     tag = ciphertext_with_tag[-16:]
     return ciphertext, tag
 
 
-def decrypt_chunk(ciphertext: bytes, key: bytes, nonce: bytes, tag: bytes) -> bytes:
+def decrypt_chunk(
+    ciphertext: bytes,
+    key: bytes,
+    nonce: bytes,
+    tag: bytes,
+    aad: bytes | None = None,
+) -> bytes:
     """
     Decrypt a single data chunk using AES-256-GCM.
 
@@ -172,6 +239,7 @@ def decrypt_chunk(ciphertext: bytes, key: bytes, nonce: bytes, tag: bytes) -> by
         key: 256-bit AES key
         nonce: 12-byte nonce used during encryption
         tag: 16-byte GCM authentication tag
+        aad: Optional additional authenticated data (must match encryption AAD)
 
     Returns:
         Decrypted plaintext bytes
@@ -181,4 +249,4 @@ def decrypt_chunk(ciphertext: bytes, key: bytes, nonce: bytes, tag: bytes) -> by
     """
     aesgcm = AESGCM(key)
     ciphertext_with_tag = ciphertext + tag
-    return aesgcm.decrypt(nonce, ciphertext_with_tag, None)
+    return aesgcm.decrypt(nonce, ciphertext_with_tag, aad)

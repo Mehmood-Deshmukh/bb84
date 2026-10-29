@@ -81,3 +81,42 @@ def test_ciphertext_length_matches_plaintext(aes_key: bytes, base_nonce: bytes) 
     ct, tag = encrypt_chunk(b"x" * 123, aes_key, derive_chunk_nonce(base_nonce, 0))
     assert len(ct) == 123
     assert len(tag) == 16
+
+
+def test_chunk_aad_success(aes_key: bytes, base_nonce: bytes) -> None:
+    nonce = derive_chunk_nonce(base_nonce, 0)
+    data = b"chunk payload authenticated with metadata"
+    aad = b"canonical_metadata_sha256_hash"
+    ct, tag = encrypt_chunk(data, aes_key, nonce, aad=aad)
+    decrypted = decrypt_chunk(ct, aes_key, nonce, tag, aad=aad)
+    assert decrypted == data
+
+
+def test_chunk_aad_wrong_or_missing_raises(aes_key: bytes, base_nonce: bytes) -> None:
+    nonce = derive_chunk_nonce(base_nonce, 0)
+    data = b"chunk payload"
+    aad = b"canonical_metadata_hash"
+    ct, tag = encrypt_chunk(data, aes_key, nonce, aad=aad)
+
+    # Wrong AAD raises InvalidTag
+    with pytest.raises(InvalidTag):
+        decrypt_chunk(ct, aes_key, nonce, tag, aad=b"wrong_metadata_hash")
+
+    # Missing AAD (None or omitted) raises InvalidTag
+    with pytest.raises(InvalidTag):
+        decrypt_chunk(ct, aes_key, nonce, tag, aad=None)
+    with pytest.raises(InvalidTag):
+        decrypt_chunk(ct, aes_key, nonce, tag)
+
+
+def test_chunk_aad_none_behaves_as_before(aes_key: bytes, base_nonce: bytes) -> None:
+    nonce = derive_chunk_nonce(base_nonce, 0)
+    data = b"plain chunk"
+    # When encrypted with aad=None (or default)
+    ct, tag = encrypt_chunk(data, aes_key, nonce, aad=None)
+    assert decrypt_chunk(ct, aes_key, nonce, tag) == data
+    assert decrypt_chunk(ct, aes_key, nonce, tag, aad=None) == data
+
+    # Passing unexpected AAD raises InvalidTag
+    with pytest.raises(InvalidTag):
+        decrypt_chunk(ct, aes_key, nonce, tag, aad=b"unexpected_aad")
