@@ -38,6 +38,7 @@ from qkd.services.wire import recv_bytes, send_bytes
 TAG_SIZE = 16
 METADATA_NONCE = bytes(12)
 METADATA_AAD = b"qkd-file-meta-v1"
+WIRE_PREFIX = 4  # length prefix in front of every wire message
 BASE_NONCE_SIZE = 8
 MAX_CHUNKS = 1 << 32  # the chunk counter in the nonce is 4 bytes
 
@@ -173,11 +174,17 @@ def send_encrypted_file(
     session_key: bytes,
     meta: FileMeta,
     on_progress: Optional[ProgressCallback] = None,
-) -> None:
-    """Send the encrypted metadata message followed by every encrypted chunk."""
+) -> int:
+    """
+    Send the encrypted metadata message followed by every encrypted chunk.
+
+    Returns the bytes put on the wire, including each 4-byte length prefix.
+    """
     keys = key_schedule(session_key)
     msg = meta.to_message()
-    send_bytes(sock, encrypt_metadata(msg, keys.metadata))
+    encrypted_meta = encrypt_metadata(msg, keys.metadata)
+    send_bytes(sock, encrypted_meta)
+    wire_bytes = WIRE_PREFIX + len(encrypted_meta)
     aad = metadata_aad(msg)
     sent = 0
     with open(filepath, "rb") as f:
@@ -185,9 +192,11 @@ def send_encrypted_file(
             plaintext = f.read(meta.chunk_size)
             ciphertext, tag = encrypt_chunk(plaintext, keys.file, derive_chunk_nonce(meta.base_nonce, i), aad)
             send_bytes(sock, tag + ciphertext)
+            wire_bytes += WIRE_PREFIX + len(tag) + len(ciphertext)
             sent += len(plaintext)
             if on_progress:
                 on_progress(i + 1, meta.num_chunks, sent)
+    return wire_bytes
 
 
 def receive_file_meta(sock: socket.socket, session_key: bytes) -> FileMeta:

@@ -1,9 +1,0 @@
-# Transfer time against payload size, with 128 qubits.
-name: payload_scaling
-sweep:
-  param: payload_mb
-  values: [1, 2, 5, 10]
-env:
-  QKD_NUM_QUBITS: 128
-repeats: 1
-eve: false

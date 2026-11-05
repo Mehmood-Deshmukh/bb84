@@ -205,3 +205,15 @@ def test_zero_chunk_metadata_is_rejected(size: int, make_file, tmp_path: Path, a
 def test_malformed_metadata_is_rejected(msg) -> None:
     with pytest.raises(MetadataError):
         FileMeta.from_message(msg)
+
+
+def test_send_reports_the_bytes_it_put_on_the_wire(make_file, aes_key: bytes) -> None:
+    src = make_file("x.bin", 250)
+    sender, receiver = socket.socketpair()
+    with sender, receiver:
+        sent = send_encrypted_file(sender, str(src), aes_key, describe_file(str(src), chunk_size=100))
+        sender.shutdown(socket.SHUT_WR)
+        received = b""
+        while chunk := receiver.recv(65536):
+            received += chunk
+    assert sent == len(received)

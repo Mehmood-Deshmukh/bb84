@@ -18,19 +18,19 @@ BB84 quantum key distribution (simulated with Qiskit Aer) used to derive an AES-
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[backend,dev]"          # extras: backend, dev, experiments, hardware
 
-pytest                                    # whole suite (536 tests, ~40 s; includes 100 MB transfers)
+pytest                                    # whole suite (557 tests, ~45 s; includes 100 MB transfers)
 pytest tests/services/test_api.py -k cancel
 pytest tests/invariants                   # real Alice/Bob runs on the Aer simulator
 
 qkd-bob                                   # CLI receiver, port 65432, writes ./received/
 qkd-alice FILE [--host H] [--port P]      # CLI sender
-qkd-bob; qkd-eve; qkd-alice FILE --eve-mode   # eavesdropper demo (Eve on 65433)
+qkd-bob; qkd-eve [--fraction F]; qkd-alice FILE --eve-mode   # eavesdropper demo (Eve on 65433)
 
 qkd-node [--port 8000] [--reload]         # backend node; docs at /docs
 cd app/frontend && npm install && npm run dev   # also: npm run lint, npm run build
 
-python scripts/benchmark.py experiments/configs/qubit_scaling.yaml   # needs [experiments]
-python scripts/plot_figures.py
+python scripts/benchmark.py experiments/configs/e4_overhead.yaml     # needs [experiments]; --repeats 2 for a quick check
+python scripts/plot_figures.py                                        # PNG + PDF into experiments/figures/
 ```
 
 Running two nodes on one machine works: give each its own `--port`, `QKD_NODE_NAME`, and working directory (history.json and received/ are cwd-relative). Point a second Vite dev server at it with `VITE_API_BASE_URL=http://127.0.0.1:8001`.
@@ -38,7 +38,7 @@ Running two nodes on one machine works: give each its own `--port`, `QKD_NODE_NA
 ## Architecture notes
 
 ### Wire protocol (send_file / receive_file / eavesdrop_demo)
-Single TCP connection. Every message is a 4-byte big-endian length prefix plus JSON or raw bytes, and goes through `qkd.services.wire` only. The message order is fixed and must change in lockstep in **usecases/send_file.py, receive_file.py, handshake.py, eavesdrop_demo.py, and mitm_demo.py** (Eve forwards the hellos, parses the next messages, then blindly forwards the rest; Mallory's relay strategy runs Bob's side against Alice; the invariants tests share one ordered step list, `WIRE_STEPS` in **tests/invariants/support.py**, that drives a generic tamper/relay proxy). Steps 0 to 4 go through a `TranscriptChannel`; "tracked" messages are hashed into the transcript, untracked ones are not:
+Single TCP connection. Every message is a 4-byte big-endian length prefix plus JSON or raw bytes, and goes through `qkd.services.wire` only. Protocol sockets must come from `wire.connect_with_retry` or `wire.accept`, which set `TCP_NODELAY`; with Nagle on, two messages in a row from one side (Alice's qber then salt) stall about 40 ms on the peer's delayed ACK. The message order is fixed and must change in lockstep in **usecases/send_file.py, receive_file.py, handshake.py, eavesdrop_demo.py, and mitm_demo.py** (Eve forwards the hellos, parses the next messages, then blindly forwards the rest; Mallory's relay strategy runs Bob's side against Alice; the invariants tests share one ordered step list, `WIRE_STEPS` in **tests/invariants/support.py**, that drives a generic tamper/relay proxy). Steps 0 to 4 go through a `TranscriptChannel`; "tracked" messages are hashed into the transcript, untracked ones are not:
 
 0. Alice → `{"hello"}`; Bob → `{"hello"}` (tracked). Protocol version `v` is 2. Fields per mode (binary values base64): none `{v, mode, params}`; sign adds `id_pk`, `nonce` (32 B); hybrid adds Alice's `kem_pk` and Bob's `kem_ct`. `params` is `ProtocolParams.security_policy()` (`final_key_bits`, `eps_sec`, `eps_cor`, `qber_threshold`, `enforce_finite_key`) and must equal the receiver's. Each side runs `auth.verifier.check(peer id_pk)` on arrival; Alice sends no qubits unless it passed. On a version, mode, or parameter mismatch Bob still replies with `{v, mode, params}`, and both raise `PeerAuthError` (no fallback)
 1. Alice → qubits as a list of QASM2 strings (untracked)
@@ -73,6 +73,9 @@ Workflows never print. They call a `Reporter` (`section/info/success/warning/err
 
 ## Configuration
 Every tunable is in `src/qkd/core/config.py` and can be overridden with `QKD_<NAME>` (read once at import; tests check this in subprocesses): `NUM_QUBITS`, `QBER_SAMPLE_FRACTION`, `QBER_THRESHOLD`, `FINAL_KEY_BITS`, `EPS_SEC`, `EPS_COR`, `ENFORCE_FINITE_KEY`, `CHUNK_SIZE`, `ALICE_HOST`, `BOB_PORT`, `EVE_PORT`, `BUFFER_SIZE`, `OUTPUT_DIR`, `HISTORY_FILE`, `NODE_PORT` (falls back to `PORT`), `NODE_NAME`, `NODE_HOST`, `AUTH_MODE`, `IDENTITY_DIR`, `KNOWN_PEERS_FILE`, `TOFU`. `ProtocolParams` bundles the per-run protocol values and is what the use cases take.
+
+## Experiments
+`scripts/benchmark.py` runs a grid from `experiments/configs/e*.yaml` (E1 detection, E2 where runs stop, E3 secure length, E4 overhead; E5 wire bytes is drawn from E4) with real runner processes. Timing comes from the runners' event timestamps, not process wall time; `sim_ms` (Alice and Bob) separates simulator cost, and `protocol_minus_sim_s` is the protocol's own time. Each run is labelled by `stopped_at` (`classify`). Outputs per experiment: `<name>.csv` (per run), `<name>_summary.csv` (median/IQR, outcome rates with Wilson 95% intervals), `<name>.meta.json` (git commit, versions, CPU). `scripts/plot_figures.py` reads only the summaries, per `experiments/figures.yaml`; its colors are a validated categorical order and an ordinal blue ramp, keep them.
 
 ## Git hygiene
 `received/`, `history.json`, `experiments/results/`, and `experiments/figures/` are run outputs and gitignored. `literature/` and `reports/` hold PDFs only.

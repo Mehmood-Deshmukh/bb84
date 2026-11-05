@@ -1,8 +1,0 @@
-# Transfer time against the number of raw qubits, with a fixed 1 MB payload.
-name: qubit_scaling
-sweep:
-  param: QKD_NUM_QUBITS
-  values: [4, 32, 64, 128, 256, 512]
-payload_mb: 1
-repeats: 1
-eve: false

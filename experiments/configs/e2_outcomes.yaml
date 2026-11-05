@@ -1,0 +1,12 @@
+# E2: where each run stops under a partial Eve, at the default N with every check on.
+# Layers in order: QBER check (point estimate), finite-key bound, key confirmation
+# (sign and hybrid only), and in none mode the AES-GCM tag on the first chunk.
+# Comparing none and hybrid shows what key confirmation adds.
+name: e2_outcomes
+description: Stopping point of each run vs Eve's intercept fraction, none vs hybrid
+repeats: 30
+fixed:
+  payload_bytes: 1000
+grid:
+  mode: [none, hybrid]
+  eve_fraction: [0.0, 0.01, 0.02, 0.05, 0.1, 0.25, 1.0]

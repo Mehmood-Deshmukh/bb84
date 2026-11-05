@@ -44,20 +44,24 @@ from qkd.usecases.handshake import alice_finished, alice_hello, session_key
 def _transmit_qubits(channel: TranscriptChannel, n: int, reporter: Reporter) -> tuple[list[int], list[str]]:
     reporter.metrics(raw_qubits=n)
     reporter.info(f"Generating {n} random bits and bases...")
-    t0 = time.perf_counter()
+    t_sim = time.perf_counter()
     bits = generate_random_bits(n)
     bases = generate_random_bases(n)
-    reporter.info(f"Generated in {time.perf_counter() - t0:.4f}s")
+    reporter.info(f"Generated in {time.perf_counter() - t_sim:.4f}s")
 
     reporter.info("Preparing qubits (encoding bits in quantum states)...")
     t0 = time.perf_counter()
     qasm_strings = prepare_qubits(bits, bases)
     reporter.success(f"Prepared {n} qubits in {time.perf_counter() - t0:.4f}s")
+    # Time spent in the simulator (QRNG and state preparation), kept apart from protocol cost
+    sim_ms = (time.perf_counter() - t_sim) * 1000
 
     # Qubits are transmitted noiselessly in this simplified protocol
     reporter.info("Sending qubits over quantum channel...")
+    sent_before = channel.bytes_sent
     channel.send_untracked(qasm_strings)
     reporter.success("Qubits transmitted")
+    reporter.metrics(sim_ms=round(sim_ms, 3), qubit_bytes=channel.bytes_sent - sent_before)
     return bits, bases
 
 
@@ -156,6 +160,8 @@ def send_file(
         reporter.section("Key Confirmation (Signed Transcript + Key Tag)")
         alice_finished(channel, auth, handshake, transcript_hash, key, reporter)
 
+    # Everything that went through the transcript channel: hellos, qubits, BB84, finished
+    reporter.metrics(channel_bytes=channel.bytes_sent + channel.bytes_received)
     reporter.stage("file_transfer")
     reporter.section("Phase 5: Secure File Transfer (Chunked Streaming)")
     meta = describe_file(filepath, params.chunk_size)
@@ -168,7 +174,8 @@ def send_file(
         if done % 100 == 0 or done == total:
             reporter.info(f"  Sent chunk {done}/{total} ({done / total * 100:.1f}%)")
 
-    send_encrypted_file(sock, filepath, key, meta, on_progress)
+    file_wire_bytes = send_encrypted_file(sock, filepath, key, meta, on_progress)
+    reporter.metrics(file_wire_bytes=file_wire_bytes)
     reporter.success(f"Encrypted file '{meta.filename}' streamed to Bob ({meta.num_chunks} chunks)")
 
     reporter.section("Transfer Complete")

@@ -25,7 +25,7 @@ from qkd.services.reporting import (
     ConsoleReporter,
     JsonEventReporter,
 )
-from qkd.services.wire import listen
+from qkd.services.wire import accept, listen
 from qkd.usecases.common import KeyConfirmationError, PeerAuthError
 from qkd.usecases.receive_file import receive_file
 
@@ -85,6 +85,20 @@ def main(argv: list[str] | None = None) -> int:
         reporter.banner("BB84 QKD Secure File Transfer", "BOB (Receiver)")
 
     reporter.stage("connecting")
+    # Load the identity before listening, so a broken identity fails before any
+    # connection is accepted, and so this setup is not counted in Alice's
+    # handshake time (she starts her clock when she sends her hello).
+    try:
+        auth = build_auth(args)
+    except PeerAuthError as exc:
+        reporter.error(f"Authentication FAILED: {exc.reason}")
+        reporter.result(OUTCOME_ABORTED_AUTH, exc.reason)
+        return 1
+    except Exception as exc:
+        reporter.error(f"Identity/auth setup failed: {exc!r}")
+        reporter.result(OUTCOME_FAILED, str(exc) or type(exc).__name__)
+        return 1
+
     with listen(args.port) as server:
         port = server.getsockname()[1]
         reporter.listening(port)
@@ -92,24 +106,13 @@ def main(argv: list[str] | None = None) -> int:
         reporter.info(f"Waiting for Alice's connection ({args.timeout:.0f}s timeout)...")
         server.settimeout(args.timeout)
         try:
-            conn, addr = server.accept()
+            conn, addr = accept(server)
         except socket.timeout:
             reporter.error("Timed out waiting for Alice's connection.")
             reporter.result(OUTCOME_FAILED, "timed out waiting for the sender")
             return 1
         conn.settimeout(None)
         reporter.success(f"Alice connected from {addr}")
-
-        try:
-            auth = build_auth(args)
-        except PeerAuthError as exc:
-            reporter.error(f"Authentication FAILED: {exc.reason}")
-            reporter.result(OUTCOME_ABORTED_AUTH, exc.reason)
-            return 1
-        except Exception as exc:
-            reporter.error(f"Identity/auth setup failed: {exc!r}")
-            reporter.result(OUTCOME_FAILED, str(exc) or type(exc).__name__)
-            return 1
 
         with conn:
             try:

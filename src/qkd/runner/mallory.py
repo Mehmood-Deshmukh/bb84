@@ -30,7 +30,7 @@ from qkd.services.reporting import (
     JsonEventReporter,
     Reporter,
 )
-from qkd.services.wire import connect_with_retry, listen
+from qkd.services.wire import accept, connect_with_retry, listen
 from qkd.usecases.common import PeerAuthError
 
 
@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         with server_sock, bob_sock:
-            alice_sock, addr = server_sock.accept()
+            alice_sock, addr = accept(server_sock)
             with alice_sock:
                 reporter.info(f"Alice connected from {addr}")
 

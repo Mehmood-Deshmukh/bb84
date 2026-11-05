@@ -84,3 +84,18 @@ def test_connect_with_retry_gives_up() -> None:
         port = server.getsockname()[1]
     with pytest.raises(ConnectionRefusedError):
         connect_with_retry("127.0.0.1", port, attempts=2, delay=0.01)
+
+
+def test_protocol_sockets_disable_nagle() -> None:
+    """Both ends of a protocol connection have TCP_NODELAY set (see wire.no_delay)."""
+    import socket as _socket
+
+    from qkd.services.wire import accept, connect_with_retry, listen
+
+    with listen(0, "127.0.0.1") as server:
+        port = server.getsockname()[1]
+        client = connect_with_retry("127.0.0.1", port, attempts=1)
+        conn, _ = accept(server)
+        with client, conn:
+            for sock in (client, conn):
+                assert sock.getsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY) != 0

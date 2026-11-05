@@ -42,12 +42,15 @@ def _measure(channel: TranscriptChannel, reporter: Reporter) -> tuple[int, list[
     reporter.metrics(raw_qubits=len(qasm_strings))
 
     reporter.info("Generating random measurement bases...")
+    t_sim = time.perf_counter()
     bases = generate_random_bases(len(qasm_strings))
 
     reporter.info("Measuring qubits (collapsing quantum states)...")
-    t0 = time.time()
+    t0 = time.perf_counter()
     bits = measure_qubits(qasm_strings, bases)
-    reporter.success(f"Measured {len(bits)} qubits in {time.time() - t0:.2f}s")
+    reporter.success(f"Measured {len(bits)} qubits in {time.perf_counter() - t0:.2f}s")
+    # Time spent in the simulator (QRNG and measurement), kept apart from protocol cost
+    reporter.metrics(sim_ms=round((time.perf_counter() - t_sim) * 1000, 3))
     return len(qasm_strings), bits, bases
 
 

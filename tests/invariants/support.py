@@ -96,7 +96,8 @@ def proxy(
 
 # ── trust, reporting, and context ────────────────────────────────────────────
 AUTH_METRICS = {"auth_mode", "peer_fingerprint", "peer_trust", "handshake_ms", "auth_overhead_bytes"}
-BB84_METRICS = {"raw_qubits", "sifted_length", "sample_size", "qber", "qber_threshold", "secure_key_bits", "key_bits"}
+BB84_METRICS = {"raw_qubits", "sifted_length", "sample_size", "qber", "qber_threshold", "secure_key_bits", "key_bits",
+                "sim_ms", "qubit_bytes", "channel_bytes", "file_wire_bytes"}
 SIGNED_STAGES = [
     "authentication",
     "quantum_transmission",

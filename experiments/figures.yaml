@@ -1,35 +1,109 @@
 # Plot definitions for scripts/plot_figures.py.
-# Each figure reads experiments/results/<source>.csv (written by scripts/benchmark.py)
-# and writes experiments/figures/<id>.png. Rows are averaged per x value.
+# Each figure reads experiments/results/<source>_summary.csv (written by
+# scripts/benchmark.py) and writes experiments/figures/<id>.png and .pdf.
+# Kinds: rate, measure, stacked, bytes (see the script's docstring).
 figures:
-  - id: qubit_scaling_time
-    source: qubit_scaling
-    x: value
-    y: elapsed_s
-    xlabel: Raw qubits
-    ylabel: Transfer time (s)
-    title: Transfer time vs. qubit count (1 MB payload)
+  - id: e1_detection
+    kind: rate
+    source: e1_detection
+    x: QKD_NUM_QUBITS
+    y: rate_qber_check
+    series: eve_fraction
+    ordinal: true
+    series_label: "f = {:g}"
+    legend_title: Eve intercepts
+    analytic: detection
+    analytic_label: "Binomial model"
+    xscale: log2
+    ylim: [0, 1.05]
+    xlabel: Raw qubits N
+    ylabel: Runs stopped by the QBER check
+    title: QBER-check detection vs N (95% Wilson band)
+    direct_labels: false
+    legend_loc: outside
 
-  - id: payload_scaling_time
-    source: payload_scaling
-    x: value
-    y: elapsed_s
-    xlabel: Payload (MB)
-    ylabel: Transfer time (s)
-    title: Transfer time vs. payload size (128 qubits)
+  - id: e2_outcomes
+    kind: stacked
+    source: e2_outcomes
+    x: eve_fraction
+    x_format: "{:g}"
+    facet: mode
+    facet_order: [none, hybrid]
+    facet_label: "mode: {}"
+    xlabel: Eve's intercept fraction f
+    title: Where each run stops (N = 8192, all checks on)
 
-  - id: eve_detection_rate
-    source: eve_detection
-    x: value
-    y: aborted
-    xlabel: Raw qubits
-    ylabel: Fraction of runs aborted
-    title: Intercept-resend detection rate
+  - id: e3_secure_length
+    kind: measure
+    source: e3_secure_length
+    x: QKD_NUM_QUBITS
+    y: secure_key_bits
+    analytic: secure_length
+    analytic_label: "Finite-key bound"
+    hline: 256
+    hline_label: "256-bit AES key"
+    xscale: log2
+    xlabel: Raw qubits N
+    ylabel: Secure key bits
+    title: Finite-key secure length on a clean channel
 
-  - id: qber_threshold_abort_rate
-    source: qber_threshold
-    x: value
-    y: aborted
-    xlabel: QBER threshold
-    ylabel: Fraction of runs aborted
-    title: Abort rate under Eve vs. QBER threshold
+  - id: e3_simulation_time
+    kind: measure
+    source: e3_secure_length
+    x: QKD_NUM_QUBITS
+    y: sim_s
+    xscale: log2
+    xlabel: Raw qubits N
+    ylabel: Seconds (median, IQR band)
+    title: Simulator time vs N (QRNG, prepare, measure)
+
+  - id: e4_protocol_time
+    kind: measure
+    source: e4_overhead
+    x: payload_bytes
+    y: protocol_minus_sim_s
+    scale: 1000
+    series: mode
+    series_order: [none, sign, hybrid]
+    xscale: log
+    yscale: log
+    xlabel: Payload (bytes)
+    ylabel: Milliseconds, simulator time excluded
+    title: Protocol time by mode and payload
+    legend_loc: upper left
+
+  - id: e4_end_to_end
+    kind: measure
+    source: e4_overhead
+    x: payload_bytes
+    y: end_to_end_minus_sim_s
+    scale: 1000
+    series: mode
+    series_order: [none, sign, hybrid]
+    xscale: log
+    yscale: log
+    xlabel: Payload (bytes)
+    ylabel: Milliseconds, simulator time excluded
+    title: Until Bob has the file, by mode and payload
+    legend_loc: upper left
+
+  - id: e4_handshake
+    kind: measure
+    source: e4_overhead
+    x: payload_bytes
+    y: handshake_ms
+    series: mode
+    series_order: [none, sign, hybrid]
+    xscale: log
+    xlabel: Payload (bytes)
+    ylabel: Milliseconds
+    title: Hello + finished exchange time by mode
+
+  - id: e5_wire_bytes
+    kind: bytes
+    source: e4_overhead
+    facet: payload_bytes
+    facet_values: [1024, 1048576]
+    facet_label: "payload {}"
+    ylabel: KiB on the wire (median)
+    title: Bytes on the wire by component
