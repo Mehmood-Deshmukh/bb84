@@ -7,6 +7,7 @@ import { formatBytes } from '../lib/format'
  */
 export default function IncomingDialog({ transfer, onRespond, onDismiss, busy }) {
   const ref = useRef(null)
+  const resuming = (transfer.attempt ?? 1) > 1
 
   useEffect(() => {
     const dialog = ref.current
@@ -27,7 +28,7 @@ export default function IncomingDialog({ transfer, onRespond, onDismiss, busy })
     >
       <div className="space-y-5 p-6">
         <h2 id="incoming-title" className="text-section font-semibold">
-          {transfer.peer.name} wants to send you a file
+          {resuming ? `${transfer.peer.name} wants to resume sending you a file` : `${transfer.peer.name} wants to send you a file`}
         </h2>
         <dl id="incoming-details" className="grid grid-cols-[6rem_minmax(0,1fr)] gap-y-1.5 text-small">
           <dt className="text-ink-2">File</dt>
@@ -38,8 +39,9 @@ export default function IncomingDialog({ transfer, onRespond, onDismiss, busy })
           <dd className="font-mono">{transfer.peer.host}:{transfer.peer.port}</dd>
         </dl>
         <p className="text-small text-ink-2">
-          Accepting starts a BB84 key exchange. If the error rate is too high, both sides stop before any file
-          data is sent.
+          {resuming
+            ? 'This transfer was interrupted. Accepting starts a new BB84 key exchange with a new key; the sender then continues after the data you already hold, so nothing is sent twice.'
+            : 'Accepting starts a BB84 key exchange. If the error rate is too high, both sides stop before any file data is sent.'}
         </p>
         <div className="flex flex-wrap gap-2">
           <button type="button" autoFocus disabled={busy} onClick={() => onRespond(transfer.id, 'accepted')}

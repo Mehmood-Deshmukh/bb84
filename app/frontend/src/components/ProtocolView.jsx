@@ -8,10 +8,11 @@ const QBER_TICKS = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
 function stageStates(transfer) {
   const reached = transfer.stage ? STAGES.indexOf(transfer.stage) : -1
   const finished = TERMINAL_STATUSES.has(transfer.status)
+  const paused = transfer.status === 'interrupted'
   const broke = transfer.status === 'aborted_qber' || transfer.status === 'aborted_auth' || transfer.status === 'failed'
   return STAGES.map((_, i) => {
     if (transfer.status === 'completed' || i < reached) return 'done'
-    if (i === reached) return finished ? (broke ? 'failed' : 'stopped') : 'current'
+    if (i === reached) return paused ? 'stopped' : finished ? (broke ? 'failed' : 'stopped') : 'current'
     return finished ? 'skipped' : 'upcoming'
   })
 }
@@ -187,9 +188,11 @@ function QberScale({ transfer }) {
   )
 }
 
-function ChunkProgress({ progress }) {
+function ChunkProgress({ progress, resumedFrom }) {
   const { chunks_done: done, num_chunks: total, bytes_done: bytes, total_bytes: totalBytes } = progress
   const fraction = total ? done / total : 1
+  // Bytes that an earlier attempt already delivered and verified; this attempt does not send them again.
+  const resumedFraction = resumedFrom && totalBytes ? Math.min(resumedFrom / totalBytes, 1) : 0
   return (
     <section aria-labelledby="chunks-heading" className="space-y-2">
       <h3 id="chunks-heading" className="font-medium">Encrypted chunks</h3>
@@ -200,13 +203,20 @@ function ChunkProgress({ progress }) {
         aria-valuemax={total}
         aria-valuenow={done}
         aria-valuetext={`${done} of ${total} chunks`}
-        className="h-2 bg-well"
+        className="relative h-2 bg-well"
       >
-        <div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${fraction * 100}%` }} />
+        <div className="absolute inset-y-0 left-0 bg-ink-2/50" style={{ width: `${resumedFraction * 100}%` }} />
+        <div className="relative h-full bg-accent transition-[width] duration-300"
+          style={{ marginLeft: `${resumedFraction * 100}%`, width: `${Math.max(fraction - resumedFraction, 0) * 100}%` }} />
       </div>
       <p className="font-mono text-small">
         {done} / {total} chunks, {formatBytes(bytes)} of {formatBytes(totalBytes)}
       </p>
+      {resumedFraction > 0 ? (
+        <p className="text-small text-ink-2">
+          The first {formatBytes(resumedFrom)} were already verified by an earlier attempt and were not sent again.
+        </p>
+      ) : null}
       <p className="text-small text-ink-2">Each chunk is sealed with AES-256-GCM under its own nonce and checked on arrival.</p>
     </section>
   )
@@ -220,7 +230,7 @@ export default function ProtocolView({ transfer }) {
         <KeyFunnel transfer={transfer} />
         <QberScale transfer={transfer} />
       </div>
-      {transfer.progress ? <ChunkProgress progress={transfer.progress} /> : null}
+      {transfer.progress ? <ChunkProgress progress={transfer.progress} resumedFrom={transfer.resumed_from_bytes} /> : null}
     </div>
   )
 }

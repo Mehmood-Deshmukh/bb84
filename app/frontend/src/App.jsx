@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { cancelTransfer, createTransfer, renameNode, respondToTransfer } from './api/client'
+import { cancelTransfer, createTransfer, renameNode, respondToTransfer, resumeTransfer } from './api/client'
 import { ACTIVE_STATUSES } from './api/types'
 import HistoryTable from './components/HistoryTable'
 import IncomingDialog from './components/IncomingDialog'
@@ -69,6 +69,8 @@ export default function App() {
 
   const cancel = (id) => runAction(id, () => cancelTransfer(id))
 
+  const resume = (id) => runAction(id, () => resumeTransfer(id))
+
   const dismiss = (id) => {
     setDismissed((prev) => new Set(prev).add(id))
     setSelectedId(id)
@@ -95,13 +97,14 @@ export default function App() {
             transfer={selected}
             events={events}
             onRespond={respond}
+            onResume={resume}
             onCancel={cancel}
             busy={busy}
             actionError={actionError}
           />
         </div>
         <div className="border-b border-rule px-4 py-6 sm:px-6 lg:row-start-2 lg:border-r lg:border-b-0">
-          <TransferList transfers={transferList} selectedId={selected?.id} onSelect={setSelectedId} />
+          <TransferList transfers={transferList} selectedId={selected?.id} onSelect={setSelectedId} onResume={resume} busy={busy} />
         </div>
       </main>
 
