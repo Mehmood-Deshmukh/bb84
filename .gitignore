@@ -10,6 +10,8 @@ dist/
 # Runtime output
 received/
 history.json
+node_state.json
+node_state-uploads/
 identity/
 known_peers.json
 experiments/results/

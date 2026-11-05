@@ -174,3 +174,31 @@ One commit per milestone on `feature/resume`.
 - Lockstep drift between the use cases, Eve, Mallory and the proxy; mitigated by tests that run resume-on through each.
 - The node's persistence file and the persistent upload copy add disk state that must be cleaned on cancel/complete.
 - Real-Aer tests are slow; the resume invariants test uses `QKD_NUM_QUBITS=64`.
+
+## 6. Outcome
+
+### Changes against the plan above
+- **Wire step 6 (Bob's sealed receipt)** was added during M2. Writing the "drop after k chunks" test showed that a
+  sender can finish writing into its socket buffers while the receiver never got the data, so Alice reported
+  `completed` for a transfer Bob had as interrupted. With the receipt, Alice reports success only after Bob
+  verified the size and the whole-file SHA-256. Eve's forwarding and the invariants proxy were extended in the
+  same commit.
+- **Peers are matched by identity fingerprint after a restart.** A real two-node run (SIGKILL the sender's runner,
+  restart both nodes, resume) showed the receiver refusing the resume offer: node ids are random per start. The
+  offer is now matched on the PQC fingerprint when both sides have one (ids only otherwise), and a sender finds a
+  restarted receiver by fingerprint. The fake-based unit tests had fixed ids and could not show this.
+- **`Transfer.attempt`** was added so clients can tell a resume offer from a new one.
+- **State is keyed by transfer id** under `.resume/` (D8), and the resume route is not in the OpenAPI schema (D13).
+
+### Verification
+Commands and results are in the commit messages and the final report of the work. Summary: the full suite
+(`pytest`) passes (654 tests, 482 before this work; none of the 482 was modified), `npm run lint` and
+`npm run build` exit 0. Beyond pytest, a real two-node run with `qkd-node` processes, hybrid authentication and
+a SIGKILL of the sender's runner (also with both nodes restarted) resumed and produced a file with the same
+SHA-256; that script depends on mDNS between local processes and is not part of the suite.
+
+### Not verified
+- The UI in a browser: components were rendered server-side for each state, clicks were not exercised.
+- Two machines on a real LAN, Windows, and files much larger than 100 MB (the SIGKILL test uses 12 MB).
+- Several simultaneous resumes on one node.
+
