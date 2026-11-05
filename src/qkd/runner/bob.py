@@ -16,17 +16,19 @@ import socket
 import sys
 from pathlib import Path
 
-from qkd.core.config import AUTH_MODE, BOB_PORT, IDENTITY_DIR, KNOWN_PEERS_FILE, OUTPUT_DIR, TOFU
+from qkd.core.config import RESUME, RESUME_SYNC_CHUNKS, AUTH_MODE, BOB_PORT, IDENTITY_DIR, KNOWN_PEERS_FILE, OUTPUT_DIR, TOFU
 from qkd.services.reporting import (
     OUTCOME_ABORTED_AUTH,
     OUTCOME_ABORTED_QBER,
     OUTCOME_COMPLETED,
     OUTCOME_FAILED,
+    OUTCOME_INTERRUPTED,
     ConsoleReporter,
     JsonEventReporter,
 )
 from qkd.services.wire import listen
-from qkd.usecases.common import PeerAuthError
+from qkd.usecases.common import PeerAuthError, TransferInterrupted
+from qkd.usecases.resume import ResumeOptions
 from qkd.usecases.receive_file import receive_file
 
 
@@ -44,7 +46,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Pin a specific peer fingerprint (uses PinnedVerifier)")
     parser.add_argument("--identity", default=IDENTITY_DIR,
                         help=f"Identity directory (default: {IDENTITY_DIR})")
-    return parser.parse_args(argv)
+    parser.add_argument("--resume", action="store_true", default=bool(RESUME),
+                        help="Make the transfer resumable (needs --transfer-id and auth sign or hybrid; "
+                             "default: QKD_RESUME)")
+    args = parser.parse_args(argv)
+    if args.resume and not args.transfer_id:
+        parser.error("--resume needs --transfer-id (it names the interrupted transfer)")
+    return args
 
 
 def build_auth(args: argparse.Namespace):
@@ -74,6 +82,10 @@ def build_auth(args: argparse.Namespace):
         seed=identity.seed,
         verifier=verifier,
     )
+
+
+def resume_options(args: argparse.Namespace) -> ResumeOptions | None:
+    return ResumeOptions(args.transfer_id, sync_chunks=RESUME_SYNC_CHUNKS) if args.resume else None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -113,10 +125,14 @@ def main(argv: list[str] | None = None) -> int:
 
         with conn:
             try:
-                result = receive_file(conn, args.output_dir, reporter, auth=auth)
+                result = receive_file(conn, args.output_dir, reporter, auth=auth, resume=resume_options(args))
             except PeerAuthError as exc:
                 reporter.error(f"Authentication FAILED: {exc.reason}")
                 reporter.result(OUTCOME_ABORTED_AUTH, exc.reason)
+                return 1
+            except TransferInterrupted as exc:
+                reporter.warning(f"Transfer interrupted: {exc.reason}. {exc.bytes_verified} verified bytes are kept; it can be resumed.")
+                reporter.result(OUTCOME_INTERRUPTED, exc.reason)
                 return 1
             except Exception as exc:
                 reporter.error(f"Decryption FAILED: {exc!r}")

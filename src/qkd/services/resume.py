@@ -33,11 +33,17 @@ _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ResumeError(Exception):
-    """A resume cannot continue (inconsistent metadata, state, or whole-file hash). `reason` is for humans."""
+    """
+    A resume cannot continue (inconsistent metadata, state, or whole-file hash). `reason` is for humans.
 
-    def __init__(self, reason: str) -> None:
+    resumable is True when the interrupted state is intact and a later attempt may succeed
+    (for example the peer never answered the resume request); False when this transfer is broken.
+    """
+
+    def __init__(self, reason: str, resumable: bool = False) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.resumable = resumable
 
 
 def meta_digest(filename: str, total_size: int) -> str:

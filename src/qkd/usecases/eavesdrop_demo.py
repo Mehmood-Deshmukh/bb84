@@ -14,6 +14,7 @@ run still ends in a QBER abort, not an authentication failure.
 from __future__ import annotations
 
 import json
+import select
 import socket
 import time
 from dataclasses import dataclass
@@ -95,16 +96,32 @@ def _report_knowledge(eve_bases: list[str], bob_bases: list[str], matching: list
 
 
 def _forward_rest(alice: socket.socket, bob: socket.socket, signed: bool) -> None:
-    """Forward the salt, the finished exchange (signed modes), then file metadata and chunks until Alice disconnects."""
+    """
+    Forward the salt, the finished exchange (signed modes), the resume negotiation when both sides
+    offered it, then file metadata and chunks until a side disconnects (with resume Bob's final
+    receipt travels back to Alice).
+    """
     try:
         forward_message(alice, bob)        # 4: salt
         if signed:
-            forward_message(bob, alice)    # 4b: Bob's finished
-            forward_message(alice, bob)    # 4b: Alice's finished
+            bob_finished = json.loads(forward_message(bob, alice))     # 4b: Bob's finished
+            alice_finished = json.loads(forward_message(alice, bob))   # 4b: Alice's finished
+            if _offers_resume(bob_finished) and _offers_resume(alice_finished):
+                forward_message(bob, alice)    # 4c: Bob's (sealed) resume request
+                forward_message(alice, bob)    # 4d: Alice's (sealed) resume grant
+                while True:                    # 5 and 6: metadata and chunks one way, Bob's receipt back
+                    ready, _, _ = select.select([alice, bob], [], [])
+                    for src in ready:
+                        forward_message(src, bob if src is alice else alice)
         while True:
             forward_message(alice, bob)
     except (ConnectionError, OSError):
         pass
+
+
+def _offers_resume(finished: object) -> bool:
+    """Eve reads the same plain flag the peers do (see usecases/handshake.py)."""
+    return isinstance(finished, dict) and finished.get("resume") == 1 and not isinstance(finished.get("resume"), bool)
 
 
 def run_eavesdrop(alice: socket.socket, bob: socket.socket, reporter: Reporter, threshold: float = QBER_THRESHOLD) -> EavesdropResult:

@@ -58,8 +58,13 @@ resume to. In `none` mode `--resume` is ignored with a warning and the transfer 
         Both sides enter 4c/4d only if their own resume is on AND the peer's finished carried the flag.
 4c  Bob  -> {"resume_request": b64(nonce || AES-GCM_kBob(json request, aad = T | "request"))}
 4d  Alice-> {"resume_grant":   b64(nonce || AES-GCM_kAlice(json grant,  aad = T | "grant" | sha256(request)))}
-5   Alice-> file metadata (now with resume_offset, sha256, resumed_from_bytes), then chunks offset..N-1
+5   Alice-> file metadata (now with resume_offset, sha256), then chunks offset..N-1
+6   Bob  -> {"resume_done": b64(nonce || AES-GCM_kBob(receipt, aad = T | "resume-done"))}
 ```
+Step 6 is Bob's receipt, sent after the size and the whole-file SHA-256 verified and the file was
+renamed into place. Alice reports success only after reading it. Without it a sender can finish
+writing into its socket buffers while the receiver never got the data (TCP gives no end-to-end
+confirmation), so the sender would call a transfer complete that the receiver has as interrupted.
 - Negotiation is after key confirmation: both `finished` signatures have verified over `T` before 4c.
 - `kBob`/`kAlice` = HKDF-SHA256(session_key, info = `bb84-resume-v1|bob` / `|alice`). They are
   separate keys, never the file key, so resume messages cannot collide with chunk nonces. Each key
@@ -138,7 +143,7 @@ rows, progress starting at the offset, `resumed_from_bytes` note, `interrupted` 
 | # | Content | Files | New tests | Gate |
 |---|---|---|---|---|
 | M1 | Crypto and storage primitives: resume subkeys + AEAD helpers, offset-aware `send/receive_encrypted_file`, `services/resume.py` (sidecar, `.part`, prefix hash), optional metadata fields (`sha256`, `resume_offset`), `written == total_size` + whole-file hash | `core/crypto_utils.py`, `core/config.py`, `services/file_stream.py`, `services/resume.py` | nonce disjointness, sidecar atomicity/recovery, drop after k chunks then resume is byte-identical, InvalidTag keeps only verified bytes, truncated stream never completes | full pytest |
-| M2 | Protocol: `usecases/resume.py`, wiring in `send_file`/`receive_file`, `finished` flag in `handshake.py`; lockstep in `eavesdrop_demo`, `mitm_demo`, `tests/invariants/support.py` | `usecases/*`, `tests/invariants/support.py` | tampered request/grant abort before data, wrong fingerprint refused, modified source restarts, capability mismatch, real-Aer kill and resume in hybrid (`NUM_QUBITS=64`) | full pytest |
+| M2 | Protocol: `usecases/resume.py` (sealed request/grant and Bob's receipt), wiring in `send_file`/`receive_file`, the `finished` flag in `handshake.py`, runner `--resume` and the `interrupted` outcome; lockstep in `eavesdrop_demo`, `mitm_demo` (unchanged: it stops at key confirmation, tested), `tests/invariants/support.py` | `usecases/*`, `runner/alice.py`, `runner/bob.py`, `services/reporting.py`, `tests/invariants/support.py` | tampered request/grant/receipt abort before data, wrong identity refused, changed source restarts, one-sided resume, Eve and Mallory with resume on, real-process SIGKILL and resume in hybrid (`NUM_QUBITS=64`) | full pytest |
 | M3 | Node/API/CLI: `interrupted` status + extension table, runner flags and outcome, persistence, `POST .../resume`, offer field, metrics, history | `services/node.py`, `transfer_store.py`, `api/*`, `peer_client.py`, `history.py`, `runner/*`, `events.py`, `app/frontend/src/api/types.js` | resume after node restart, interrupted in history, API 409s, offer carries resume id | full pytest |
 | M4 | UI | `app/frontend/src/components/*`, `api/client.js` | (lint, build) | full pytest + lint + build |
 | M5 | Docs | `README.md`, `CLAUDE.md`, this plan | | full pytest + lint + build |

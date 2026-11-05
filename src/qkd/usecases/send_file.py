@@ -8,13 +8,16 @@ Message order on the socket (must match receive_file.py and eavesdrop_demo.py):
   3  -> {"sample_indices"}     <- {"sample_bits"}       -> {"qber"}   (both abort if qber >= threshold)
   4  -> {"salt"}               T = transcript digest
   4b <- {"finished"}           -> {"finished"}          (untracked; sign and hybrid only)
+  4c <- {"resume_request"}     4d -> {"resume_grant"}   (only if resume is on and both finished carried "resume": 1)
   5  -> file metadata, then one message per chunk (metadata bound as GCM AAD)
+  6  <- {"resume_done"}        (resume only: Bob's sealed receipt after the whole file verified)
 """
 
 from __future__ import annotations
 
 import socket
 import time
+from typing import Optional
 
 from qkd.core.bb84_protocol import (
     choose_sample_indices,
@@ -29,9 +32,17 @@ from qkd.core.config import ProtocolParams
 from qkd.core.quantum_channel import prepare_qubits
 from qkd.services.file_stream import describe_file, send_encrypted_file
 from qkd.services.reporting import Reporter
+from qkd.services.resume import ResumeError, chunk_boundary
 from qkd.services.transcript import TranscriptChannel
-from qkd.usecases.common import AuthContext, KeyExchangeResult, report_qber_verdict, report_summary
+from qkd.usecases.common import (
+    AuthContext,
+    KeyExchangeResult,
+    TransferInterrupted,
+    report_qber_verdict,
+    report_summary,
+)
 from qkd.usecases.handshake import alice_finished, alice_hello, session_key
+from qkd.usecases.resume import ResumeOptions, alice_await_receipt, alice_negotiate, wants_resume
 
 
 def _transmit_qubits(channel: TranscriptChannel, n: int, reporter: Reporter) -> tuple[list[int], list[str]]:
@@ -118,14 +129,20 @@ def send_file(
     reporter: Reporter,
     params: ProtocolParams = ProtocolParams(),
     auth: AuthContext | None = None,
+    resume: Optional[ResumeOptions] = None,
 ) -> KeyExchangeResult:
     """
     Authenticate Bob, run the key exchange and, unless it aborts, stream the encrypted file.
 
     Raises PeerAuthError if the hello or finished exchange fails; no qubits are sent
     unless Bob's identity passed auth.verifier.
+
+    With `resume` (and auth sign or hybrid) Alice offers to continue an interrupted transfer: Bob
+    says how much he holds, and only the rest is sent, under this session's new key. If the
+    connection then drops, TransferInterrupted is raised. Without it the behaviour is unchanged.
     """
     t_start = time.perf_counter()
+    offer_resume = wants_resume(resume, auth, reporter)
     channel = TranscriptChannel(sock, "alice")
     reporter.stage("authentication")
     reporter.section("Phase 0: Authentication (Hello Exchange)")
@@ -136,24 +153,51 @@ def send_file(
         return kx
 
     transcript_hash = channel.digest()
+    negotiate = False
     if handshake.signed:
         reporter.stage("key_confirmation")
         reporter.section("Key Confirmation (Signed Transcript)")
-        alice_finished(channel, auth, handshake, transcript_hash, reporter)
+        peer_resume = alice_finished(channel, auth, handshake, transcript_hash, reporter, offer_resume)
+        negotiate = offer_resume and peer_resume
+        if offer_resume and not peer_resume:
+            reporter.warning("The receiver does not offer resume. Sending the whole file.")
+
+    key = session_key(kx.key, handshake, transcript_hash)
+    offset = 0
+    try:
+        if negotiate:
+            offset, _ = alice_negotiate(channel, key, transcript_hash, auth, resume, filepath, params.chunk_size, reporter)
+    except ResumeError as exc:
+        if exc.resumable:
+            raise TransferInterrupted(exc.reason) from exc
+        raise
+    except (ConnectionError, OSError) as exc:
+        raise TransferInterrupted(f"connection lost during resume negotiation: {exc}") from exc
 
     reporter.stage("file_transfer")
     reporter.section("Phase 5: Secure File Transfer (Chunked Streaming)")
-    meta = describe_file(filepath, params.chunk_size)
+    meta = describe_file(filepath, params.chunk_size, with_sha256=negotiate, resume_offset=offset if negotiate else None)
     reporter.info(f"File: {meta.filename} ({meta.total_size} bytes)")
-    reporter.info(f"Streaming as {meta.num_chunks} chunk(s) of {meta.chunk_size // 1024} KB")
-    reporter.progress(0, meta.num_chunks, 0, meta.total_size)
+    if negotiate:
+        reporter.metrics(resumed_from_bytes=chunk_boundary(offset, meta.chunk_size, meta.total_size), bytes_total=meta.total_size)
+    reporter.info(f"Streaming as {meta.num_chunks} chunk(s) of {meta.chunk_size // 1024} KB"
+                  + (f", from chunk {offset}" if offset else ""))
+    reporter.progress(offset, meta.num_chunks, chunk_boundary(offset, meta.chunk_size, meta.total_size), meta.total_size)
 
     def on_progress(done: int, total: int, sent: int) -> None:
         reporter.progress(done, total, sent, meta.total_size)
         if done % 100 == 0 or done == total:
             reporter.info(f"  Sent chunk {done}/{total} ({done / total * 100:.1f}%)")
 
-    send_encrypted_file(sock, filepath, session_key(kx.key, handshake, transcript_hash), meta, on_progress)
+    try:
+        send_encrypted_file(sock, filepath, key, meta, on_progress, start_chunk=offset)
+        if negotiate:
+            reporter.info("Waiting for the receiver to confirm the whole file...")
+            alice_await_receipt(channel, key, transcript_hash, meta.sha256, meta.total_size)
+    except (ConnectionError, OSError) as exc:
+        if negotiate:
+            raise TransferInterrupted(f"connection lost before the receiver confirmed the file: {exc}") from exc
+        raise
     reporter.success(f"Encrypted file '{meta.filename}' streamed to Bob ({meta.num_chunks} chunks)")
 
     reporter.section("Transfer Complete")

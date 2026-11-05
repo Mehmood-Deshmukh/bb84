@@ -41,6 +41,18 @@ WIRE_STEPS: list[tuple[str, str]] = [
 ]
 
 
+# The same steps when both sides run with resume on (sign/hybrid): the sealed request and grant
+# sit between the finished exchange and the metadata.
+WIRE_STEPS_RESUME: list[tuple[str, str]] = [
+    *WIRE_STEPS[:-1],
+    ("4c-resume-request", B2A),  # Bob's sealed resume request
+    ("4d-resume-grant", A2B),    # Alice's sealed resume grant
+    WIRE_STEPS[-1],
+]
+# After the chunks, with resume: Bob's sealed receipt. Pass it as final_steps (with chunks=N).
+RESUME_FINAL_STEPS: list[tuple[str, str]] = [("6-resume-done", B2A)]
+
+
 def proxy(
     sock_from_alice: socket.socket,
     sock_to_bob: socket.socket,
@@ -48,6 +60,10 @@ def proxy(
     tamper_step: Optional[str] = None,
     tamper: Optional[Callable[[Any], Any]] = None,
     stop_after: Optional[str] = None,
+    steps: Optional[list[tuple[str, str]]] = None,
+    max_chunks: Optional[int] = None,
+    chunks: Optional[int] = None,
+    final_steps: Optional[list[tuple[str, str]]] = None,
 ) -> None:
     """
     Relay the wire between Alice and Bob, optionally rewriting one step.
@@ -61,23 +77,38 @@ def proxy(
     Both of the proxy's own socket ends are shut down on every return path, so a
     peer still blocked in recv (e.g. Bob waiting for Alice's finished after Alice
     has already failed) unblocks with a ConnectionError instead of hanging.
+
+    `steps` defaults to WIRE_STEPS; pass WIRE_STEPS_RESUME when both sides run with resume on.
+    With max_chunks=k only k encrypted chunk messages are relayed before the connection is cut,
+    which is how the resume tests interrupt a transfer. With chunks=N exactly N chunk messages are
+    relayed (instead of "until EOF") and then final_steps, e.g. RESUME_FINAL_STEPS, which run Bob -> Alice.
     """
+    steps = WIRE_STEPS if steps is None else steps
 
     def ends(direction: str) -> tuple[socket.socket, socket.socket]:
         return (sock_from_alice, sock_to_bob) if direction == A2B else (sock_to_bob, sock_from_alice)
 
+    def relay_step(step_id: str, direction: str) -> None:
+        src, dst = ends(direction)
+        if step_id == tamper_step:
+            assert tamper is not None
+            wire.send_bytes(dst, wire.encode_json(tamper(wire.decode_json(wire.recv_bytes(src)))))
+        else:
+            wire.forward_message(src, dst)
+
     try:
-        for step_id, direction in WIRE_STEPS:
-            src, dst = ends(direction)
-            if step_id == tamper_step:
-                assert tamper is not None
-                wire.send_bytes(dst, wire.encode_json(tamper(wire.decode_json(wire.recv_bytes(src)))))
-            else:
-                wire.forward_message(src, dst)
+        for step_id, direction in steps:
+            relay_step(step_id, direction)
             if step_id == stop_after:
                 return
-        while True:  # encrypted chunks, Alice -> Bob, until Alice closes
+        relayed = 0
+        limit = max_chunks if max_chunks is not None else chunks
+        while limit is None or relayed < limit:  # encrypted chunks, Alice -> Bob, until Alice closes
             wire.forward_message(sock_from_alice, sock_to_bob)
+            relayed += 1
+        if max_chunks is None:
+            for step_id, direction in final_steps or []:
+                relay_step(step_id, direction)
     except (ConnectionError, OSError):
         return
     finally:
