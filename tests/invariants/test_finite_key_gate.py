@@ -50,7 +50,8 @@ def test_default_qubits_pass_the_bound_with_matching_keys(connected) -> None:
 
 def _flip_every_qubit(qasm_strings: list[str]) -> list[str]:
     # An X before the basis change flips the encoded bit in either basis
-    return [q.replace("qreg q[1];\n", "qreg q[1];\nx q[0];\n", 1) for q in qasm_strings]
+    # Match the declaration alone: a bit-0 '+' qubit has no gates and no trailing newline
+    return [q.replace("qreg q[1];", "qreg q[1];\nx q[0];", 1) for q in qasm_strings]
 
 
 def test_key_mismatch_is_caught_by_key_confirmation(keys, parallel, make_file, tmp_path: Path) -> None:

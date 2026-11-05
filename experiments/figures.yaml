@@ -72,6 +72,7 @@ figures:
     xlabel: Payload (bytes)
     ylabel: Milliseconds, simulator time excluded
     title: Protocol time by mode and payload
+    direct_labels: false  # lines converge at 100 MB, end labels would collide
     legend_loc: upper left
 
   - id: e4_end_to_end
@@ -87,6 +88,7 @@ figures:
     xlabel: Payload (bytes)
     ylabel: Milliseconds, simulator time excluded
     title: Until Bob has the file, by mode and payload
+    direct_labels: false  # lines converge at 100 MB, end labels would collide
     legend_loc: upper left
 
   - id: e4_handshake
@@ -109,3 +111,16 @@ figures:
     facet_label: "payload {}"
     ylabel: KiB on the wire (median)
     title: Bytes on the wire by component
+
+  - id: e6_latency
+    kind: measure
+    source: e6_latency
+    x: rtt_ms
+    y: protocol_minus_sim_s
+    scale: 1000
+    series: mode
+    series_order: [none, sign, hybrid]
+    xlabel: Added round-trip time (ms)
+    ylabel: Milliseconds, simulator time excluded
+    title: Protocol time vs network round-trip time
+    legend_loc: upper left

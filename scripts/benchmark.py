@@ -26,6 +26,9 @@ Parameters:
   mode           none | sign | hybrid (default none)
   payload_bytes  size of the random file Alice sends (default 1000)
   eve_fraction   share of qubits Eve intercepts; 0 means no Eve (default 0)
+  rtt_ms         round-trip time added between Alice and the next hop by
+                 scripts/latency_proxy.py (rtt_ms / 2 each way); unset means no proxy,
+                 0 means the proxy with no delay (the baseline for its own overhead)
   QKD_*          anything else is passed to all processes as an environment variable
 
 Outputs: one folder per invocation (a "run id"), never overwritten:
@@ -88,8 +91,9 @@ METRICS = [
     "raw_qubits", "sifted_length", "sample_size", "qber", "secure_key_bits", "key_bits",
     "handshake_ms", "auth_overhead_bytes", "qubit_bytes", "channel_bytes", "file_wire_bytes",
 ]
-SPECIAL = {"mode", "payload_bytes", "eve_fraction"}
-DEFAULTS = {"mode": "none", "payload_bytes": 1000, "eve_fraction": 0.0}
+SPECIAL = {"mode", "payload_bytes", "eve_fraction", "rtt_ms"}
+DEFAULTS = {"mode": "none", "payload_bytes": 1000, "eve_fraction": 0.0, "rtt_ms": None}
+LATENCY_PROXY = ROOT / "scripts" / "latency_proxy.py"
 PROCESS_TIMEOUT = 600.0
 
 
@@ -247,6 +251,19 @@ def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict
                 runner("eve", "--bob-port", str(bob_port), "--listen-port", str(alice_port), "--fraction", str(fraction)),
                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             ))
+
+        if point.get("rtt_ms") is not None:
+            # Alice -> latency proxy -> (Eve ->) Bob; half the round trip in each direction
+            proxy = subprocess.Popen(
+                [sys.executable, str(LATENCY_PROXY), "--target-port", str(alice_port),
+                 "--one-way-ms", str(float(point["rtt_ms"]) / 2)],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+            procs.append(proxy)
+            ready = proxy.stdout.readline()
+            if not ready.startswith("listening "):
+                raise RuntimeError(f"latency proxy did not start: {ready!r}")
+            alice_port = int(ready.split()[1])
 
         wall_start = time.perf_counter()
         alice = subprocess.run(
