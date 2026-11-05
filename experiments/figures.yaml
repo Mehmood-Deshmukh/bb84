@@ -15,7 +15,7 @@ figures:
     analytic: detection
     analytic_label: "Binomial model"
     xscale: log2
-    ylim: [0, 1.05]
+    ylim: [-0.03, 1.05]  # small margin so lines at exactly 0 stay visible above the axis
     xlabel: Raw qubits N
     ylabel: Runs stopped by the QBER check
     title: QBER-check detection vs N (95% Wilson band)
