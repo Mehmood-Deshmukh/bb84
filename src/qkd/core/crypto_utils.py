@@ -100,6 +100,45 @@ def derive_session_key(
         raise ValueError(f"Invalid mode: {mode!r}. Allowed: none, sign, hybrid")
 
 
+RESUME_KEY_INFO = b"bb84-resume-v1|"
+RESUME_ROLES = ("alice", "bob")
+_RESUME_NONCE_BYTES = 12
+
+
+def derive_resume_key(session_key: bytes, role: str) -> bytes:
+    """
+    Derive the key that protects one resume negotiation message (HKDF-SHA256).
+
+    There is one key per sender role ("bob" seals the request, "alice" the grant) and neither is the
+    file key, so resume messages live in a different key space from the chunk nonces
+    (base_nonce || index) used under session_key.
+    """
+    if role not in RESUME_ROLES:
+        raise ValueError(f"Invalid role: {role!r}. Allowed: {', '.join(RESUME_ROLES)}")
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=RESUME_KEY_INFO + role.encode()).derive(session_key)
+
+
+def seal_resume_message(session_key: bytes, role: str, plaintext: bytes, aad: bytes) -> bytes:
+    """AES-256-GCM seal under the role's resume key. Returns nonce(12B) || ciphertext || tag."""
+    nonce = os.urandom(_RESUME_NONCE_BYTES)
+    return nonce + AESGCM(derive_resume_key(session_key, role)).encrypt(nonce, plaintext, aad)
+
+
+def open_resume_message(session_key: bytes, role: str, blob: bytes, aad: bytes) -> bytes:
+    """
+    Open a message produced by seal_resume_message.
+
+    Raises cryptography.exceptions.InvalidTag if the blob, the role, the key or the aad is wrong
+    (also for a blob too short to hold a nonce and a tag).
+    """
+    from cryptography.exceptions import InvalidTag
+
+    if len(blob) < _RESUME_NONCE_BYTES + 16:
+        raise InvalidTag()
+    nonce, sealed = blob[:_RESUME_NONCE_BYTES], blob[_RESUME_NONCE_BYTES:]
+    return AESGCM(derive_resume_key(session_key, role)).decrypt(nonce, sealed, aad)
+
+
 def encrypt_file(filepath: str, key: bytes) -> tuple[bytes, bytes, bytes, str]:
     """
     Encrypt a file using AES-256-GCM.

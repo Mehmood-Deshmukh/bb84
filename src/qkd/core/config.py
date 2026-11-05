@@ -86,6 +86,13 @@ IDENTITY_DIR = _env("IDENTITY_DIR", "identity", str)
 KNOWN_PEERS_FILE = _env("KNOWN_PEERS_FILE", "known_peers.json", str)
 TOFU = _env("TOFU", 1, _cast_tofu)
 
+# ─────────────────────────────────────────────
+# Resumable transfers (off by default; needs AUTH_MODE sign or hybrid)
+# ─────────────────────────────────────────────
+RESUME = _env("RESUME", 0, _cast_tofu)  # 1 = runners launched by the node negotiate resume; CLI flag --resume
+RESUME_SYNC_CHUNKS = _env("RESUME_SYNC_CHUNKS", 8, int)  # verified chunks between fsync + sidecar updates
+STATE_FILE = _env("STATE_FILE", "node_state.json", str)  # interrupted transfers kept by the backend node
+
 
 @dataclass(frozen=True)
 class ProtocolParams:
