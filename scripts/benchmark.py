@@ -2,7 +2,8 @@
 """
 Run an experiment defined in experiments/configs/*.yaml.
 
-    python scripts/benchmark.py experiments/configs/e4_overhead.yaml [--repeats N]
+    python scripts/benchmark.py experiments/configs/e4_overhead.yaml [--repeats N] [--seed S]
+    python scripts/benchmark.py --resume experiments/results/e4_overhead/<run id>
 
 Every run starts real qkd.runner.bob, qkd.runner.alice, and (optionally) qkd.runner.eve
 processes on localhost, exactly as a user would. Timing comes from the JSON events the
@@ -27,11 +28,21 @@ Parameters:
   eve_fraction   share of qubits Eve intercepts; 0 means no Eve (default 0)
   QKD_*          anything else is passed to all processes as an environment variable
 
-Outputs (experiments/results/):
-  <name>.csv            one row per run
-  <name>_summary.csv    one row per grid point: median and IQR of every timing and byte
-                        column, and the rate of each outcome with a Wilson 95% interval
-  <name>.meta.json      git commit, package versions, CPU, Python, and the config
+Outputs: one folder per invocation (a "run id"), never overwritten:
+
+  experiments/results/<name>/<YYYYMMDDTHHMMZ>_<commit7>[-dirty][-scratch]/
+    runs.csv      one row per run, appended as each run finishes (survives interruption)
+    summary.csv   one row per grid point: median and IQR of every timing and byte column,
+                  and the rate of each outcome with a Wilson 95% interval; written at the end
+    meta.json     status (running | complete), git commit, package versions, CPU, Python,
+                  the config, the run order seed; resume history
+    log.txt       everything this script printed
+  experiments/results/<name>/latest  ->  the newest run id that is paper grade
+
+A run id is paper grade when it completed, ran on a clean tree, and used the config's
+own repeats. Anything else is marked -scratch (or -dirty) and never moves `latest`.
+scripts/plot_figures.py reads only `latest`. Findings are written up by hand in
+experiments/ignore-INSIGHTS.md (gitignored), one entry per run id.
 
 Needs the `experiments` extra (pyyaml).
 """
@@ -379,6 +390,72 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def read_csv(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+class RowLog:
+    """Append rows to runs.csv one at a time, flushing each, so an interrupted run keeps them."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        existing = read_csv(path)
+        self.fields: Optional[list[str]] = list(existing[0]) if existing else None
+
+    def append(self, row: dict) -> None:
+        new_file = self.fields is None
+        if new_file:
+            self.fields = list(row)
+        with open(self.path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.fields)
+            if new_file:
+                writer.writeheader()
+            writer.writerow(row)
+            f.flush()
+            os.fsync(f.fileno())
+
+
+def run_id(started: datetime, commit: Optional[str], dirty: bool, scratch: bool) -> str:
+    """Folder name for one invocation: UTC start time, short commit, and quality flags."""
+    name = f"{started.strftime('%Y%m%dT%H%MZ')}_{(commit or 'nocommit')[:7]}"
+    if dirty:
+        name += "-dirty"
+    if scratch:
+        name += "-scratch"
+    return name
+
+
+def paper_grade(meta: dict) -> bool:
+    """Complete, clean tree, and the config's own number of repeats."""
+    return (meta.get("status") == "complete" and not meta.get("git_dirty")
+            and meta.get("repeats") == meta.get("config", {}).get("repeats", 30))
+
+
+def done_keys(rows: list[dict], keys: list[str]) -> set[tuple[str, ...]]:
+    """(grid values..., repeat) of every run already in runs.csv, as strings."""
+    return {tuple(str(r[k]) for k in keys) + (str(r["repeat"]),) for r in rows}
+
+
+def run_key(point: dict, keys: list[str], repeat: int) -> tuple[str, ...]:
+    return tuple(str(point[k]) for k in keys) + (str(repeat),)
+
+
+def point_label(point: dict, keys: list[str]) -> str:
+    return ", ".join(f"{k}={point[k]}" for k in keys)
+
+
+def update_latest(exp_dir: Path, run_dir: Path) -> None:
+    """Point <experiment>/latest at run_dir (a relative symlink, replaced atomically)."""
+    tmp = exp_dir / ".latest.tmp"
+    if tmp.is_symlink() or tmp.exists():
+        tmp.unlink()
+    tmp.symlink_to(run_dir.name)
+    os.replace(tmp, exp_dir / "latest")
+
+
 def grid_points(cfg: dict) -> tuple[list[str], list[dict]]:
     """(grid parameter names, list of full parameter dicts) for every combination."""
     grid = cfg.get("grid", {})
@@ -409,25 +486,54 @@ def main() -> int:
     import yaml
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("config", type=Path)
-    parser.add_argument("--repeats", type=int, help="Override the config's repeats (for a quick check)")
-    parser.add_argument("--name", help="Override the output name")
+    parser.add_argument("config", type=Path, nargs="?")
+    parser.add_argument("--repeats", type=int, help="Override the config's repeats (marks the run id -scratch)")
     parser.add_argument("--seed", type=int, help="Seed for the run order (default: config 'seed', else random)")
+    parser.add_argument("--resume", type=Path, metavar="RUN_DIR",
+                        help="Continue an interrupted run id; uses its recorded config, repeats, and seed")
     args = parser.parse_args()
+    if (args.config is None) == (args.resume is None):
+        parser.error("give either a config file or --resume RUN_DIR")
 
-    cfg = yaml.safe_load(args.config.read_text())
-    repeats = args.repeats or cfg.get("repeats", 30)
-    name = args.name or cfg["name"]
+    if args.resume:
+        run_dir = args.resume.resolve()
+        meta = json.loads((run_dir / "meta.json").read_text())
+        cfg, repeats, seed = meta["config"], meta["repeats"], meta["run_order_seed"]
+        env_now = environment(cfg)
+        if (env_now["git_commit"], env_now["git_dirty"]) != (meta["git_commit"], meta["git_dirty"]):
+            print(f"refusing to resume: run used {meta['git_commit'][:7]} (dirty={meta['git_dirty']}), "
+                  f"tree is now {env_now['git_commit'][:7]} (dirty={env_now['git_dirty']})", file=sys.stderr)
+            return 2
+        meta.setdefault("resumed", []).append(datetime.now(timezone.utc).isoformat())
+    else:
+        cfg = yaml.safe_load(args.config.read_text())
+        repeats = args.repeats or cfg.get("repeats", 30)
+        seed = args.seed if args.seed is not None else cfg.get("seed", secrets.randbits(32))
+        meta = environment(cfg)
+        meta.update(repeats=repeats, run_order_seed=seed, status="running")
+        scratch = repeats != cfg.get("repeats", 30)
+        started = datetime.fromisoformat(meta["started"])
+        run_dir = RESULTS / cfg["name"] / run_id(started, meta["git_commit"], meta["git_dirty"], scratch)
+        run_dir.mkdir(parents=True, exist_ok=False)
+        meta["run_id"] = run_dir.name
+
+    meta_path = run_dir / "meta.json"
+    meta_path.write_text(json.dumps(meta, indent=2, default=str))
+    log_file = open(run_dir / "log.txt", "a")
+
+    def say(line: str) -> None:
+        print(line, flush=True)
+        log_file.write(line + "\n")
+        log_file.flush()
+
     keys, points = grid_points(cfg)
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    meta = environment(cfg)
-    meta["repeats"] = repeats
-    seed = args.seed if args.seed is not None else cfg.get("seed", secrets.randbits(32))
-    meta["run_order_seed"] = seed
+    rows_log = RowLog(run_dir / "runs.csv")
+    done = done_keys(read_csv(run_dir / "runs.csv"), keys)
+    plan = run_plan(len(points), repeats, seed)
+    todo = [(order, i, r) for order, (i, r) in enumerate(plan) if run_key(points[i], keys, r) not in done]
+    say(f"run id {run_dir.name}: {len(plan)} runs planned, {len(plan) - len(todo)} already done, seed {seed}")
     base_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
 
-    rows: list[dict] = []
-    plan = run_plan(len(points), repeats, seed)
     with tempfile.TemporaryDirectory(prefix="qkd-bench-") as tmp:
         work = Path(tmp)
         ids = _identities(work)
@@ -441,21 +547,26 @@ def main() -> int:
                 path.write_bytes(os.urandom(size))
                 payloads[size] = (path, _sha256(path))
 
-        for order, (index, repeat) in enumerate(plan):
+        for n, (order, index, repeat) in enumerate(todo, start=len(plan) - len(todo) + 1):
             point = points[index]
             payload, sha = payloads[int(point["payload_bytes"])]
             row = {**{k: point[k] for k in keys}, "repeat": repeat, "order": order,
                    **run_once(point, payload, sha, work, ids, base_env)}
-            rows.append(row)
-            label = ", ".join(f"{k}={point[k]}" for k in keys)
-            print(f"[{len(rows)}/{len(plan)}] {label} #{repeat + 1}: {row['stopped_at']} "
-                  f"protocol={row['protocol_s']}s", flush=True)
+            rows_log.append(row)
+            say(f"[{n}/{len(plan)}] {point_label(point, keys)} #{repeat + 1}: {row['stopped_at']} "
+                f"protocol={row['protocol_s']}s")
 
-    meta["finished"] = datetime.now(timezone.utc).isoformat()
-    write_csv(RESULTS / f"{name}.csv", rows)
-    write_csv(RESULTS / f"{name}_summary.csv", summarize(rows, keys))
-    (RESULTS / f"{name}.meta.json").write_text(json.dumps(meta, indent=2, default=str))
-    print(f"Wrote experiments/results/{name}.csv, {name}_summary.csv, {name}.meta.json")
+    # The summary is always computed from runs.csv on disk, so resumed runs are included
+    write_csv(run_dir / "summary.csv", summarize(read_csv(run_dir / "runs.csv"), keys))
+    meta.update(status="complete", finished=datetime.now(timezone.utc).isoformat())
+    meta_path.write_text(json.dumps(meta, indent=2, default=str))
+    if paper_grade(meta):
+        update_latest(run_dir.parent, run_dir)
+        say(f"complete; {run_dir.parent.name}/latest -> {run_dir.name}")
+    else:
+        say("complete; not paper grade (scratch or dirty tree), so latest was not moved")
+    say(f"results in {run_dir.relative_to(ROOT)}")
+    log_file.close()
     return 0
 
 

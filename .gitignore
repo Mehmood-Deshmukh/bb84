@@ -17,6 +17,9 @@ known_peers.json
 experiments/results/
 experiments/figures/
 
+# Local notes and plans (e.g. experiments/ignore-INSIGHTS.md)
+**/ignore-*
+
 # Archives
 **/*.zip
 

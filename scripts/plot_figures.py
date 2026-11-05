@@ -4,8 +4,10 @@ Render the figures defined in experiments/figures.yaml from the benchmark summar
 
     python scripts/plot_figures.py [--only FIGURE_ID]
 
-Each figure reads experiments/results/<source>_summary.csv (written by
-scripts/benchmark.py) and writes experiments/figures/<id>.png and <id>.pdf.
+Each figure reads experiments/results/<source>/latest/summary.csv (the newest
+paper-grade run id written by scripts/benchmark.py) and writes
+experiments/figures/<id>.png and <id>.pdf. experiments/figures/sources.json records
+which run id every figure was drawn from.
 
 Figure kinds:
   rate     an outcome rate per x, one line per series, Wilson 95% band; optional
@@ -26,8 +28,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -90,8 +94,12 @@ def style() -> None:
     })
 
 
+def summary_path(source: str) -> Path:
+    return EXPERIMENTS / "results" / source / "latest" / "summary.csv"
+
+
 def load(source: str) -> list[dict[str, Any]]:
-    path = EXPERIMENTS / "results" / f"{source}_summary.csv"
+    path = summary_path(source)
     with open(path) as f:
         rows = list(csv.DictReader(f))
     for row in rows:
@@ -318,18 +326,25 @@ def main() -> int:
     out_dir = EXPERIMENTS / "figures"
     out_dir.mkdir(exist_ok=True)
 
+    sources_path = out_dir / "sources.json"
+    sources = json.loads(sources_path.read_text()) if sources_path.exists() else {}
     for fig in figures:
         if args.only and fig["id"] != args.only:
             continue
-        source = EXPERIMENTS / "results" / f"{fig['source']}_summary.csv"
+        source = summary_path(fig["source"])
         if not source.exists():
-            print(f"skip {fig['id']}: {source.relative_to(ROOT)} not found (run scripts/benchmark.py first)")
+            print(f"skip {fig['id']}: {source.relative_to(ROOT)} not found "
+                  "(no paper-grade run yet; run scripts/benchmark.py with the config's repeats)")
             continue
         figure = RENDERERS[fig["kind"]](fig, load(fig["source"]))
         for ext in ("png", "pdf"):
             figure.savefig(out_dir / f"{fig['id']}.{ext}", dpi=200, bbox_inches="tight")
         plt.close(figure)
-        print(f"wrote experiments/figures/{fig['id']}.png and .pdf")
+        run = source.parent.resolve().name
+        sources[fig["id"]] = {"experiment": fig["source"], "run_id": run,
+                              "rendered": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        print(f"wrote experiments/figures/{fig['id']}.png and .pdf (from {fig['source']}/{run})")
+    sources_path.write_text(json.dumps(sources, indent=2, sort_keys=True))
     return 0
 
 

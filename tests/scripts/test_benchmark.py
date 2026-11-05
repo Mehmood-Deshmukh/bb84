@@ -132,3 +132,54 @@ def test_run_plan_covers_every_run_once_in_a_seeded_order() -> None:
     assert plan != bench.run_plan(4, 3, seed=8)
     # Shuffled, not grouped: the first point's repeats are not all at the front
     assert plan[:3] != [(0, 0), (0, 1), (0, 2)]
+
+
+def test_run_id_names_time_commit_and_quality_flags() -> None:
+    from datetime import datetime, timezone
+
+    t = datetime(2026, 11, 5, 18, 26, tzinfo=timezone.utc)
+    assert bench.run_id(t, "0ca1f28abcdef", False, False) == "20261105T1826Z_0ca1f28"
+    assert bench.run_id(t, "0ca1f28abcdef", True, True) == "20261105T1826Z_0ca1f28-dirty-scratch"
+
+
+@pytest.mark.parametrize(
+    "meta, expected",
+    [
+        ({"status": "complete", "git_dirty": False, "repeats": 30, "config": {"repeats": 30}}, True),
+        ({"status": "complete", "git_dirty": False, "repeats": 30, "config": {}}, True),  # default 30
+        ({"status": "running", "git_dirty": False, "repeats": 30, "config": {"repeats": 30}}, False),
+        ({"status": "complete", "git_dirty": True, "repeats": 30, "config": {"repeats": 30}}, False),
+        ({"status": "complete", "git_dirty": False, "repeats": 2, "config": {"repeats": 30}}, False),
+    ],
+    ids=["clean", "default_repeats", "running", "dirty", "scratch"],
+)
+def test_paper_grade(meta: dict, expected: bool) -> None:
+    assert bench.paper_grade(meta) is expected
+
+
+def test_row_log_appends_and_resume_skips_finished_runs(tmp_path) -> None:
+    keys = ["mode", "eve_fraction"]
+    log = bench.RowLog(tmp_path / "runs.csv")
+    log.append({"mode": "none", "eve_fraction": 0.0, "repeat": 0, "stopped_at": "delivered"})
+    log.append({"mode": "none", "eve_fraction": 1.0, "repeat": 1, "stopped_at": "qber_check"})
+
+    # A new RowLog on the same file (what --resume does) keeps the header and appends
+    again = bench.RowLog(tmp_path / "runs.csv")
+    again.append({"mode": "hybrid", "eve_fraction": 0.0, "repeat": 0, "stopped_at": "delivered"})
+    rows = bench.read_csv(tmp_path / "runs.csv")
+    assert [r["mode"] for r in rows] == ["none", "none", "hybrid"]
+
+    done = bench.done_keys(rows, keys)
+    assert bench.run_key({"mode": "none", "eve_fraction": 1.0}, keys, 1) in done
+    assert bench.run_key({"mode": "none", "eve_fraction": 1.0}, keys, 0) not in done
+
+
+def test_update_latest_points_at_the_run_dir(tmp_path) -> None:
+    first, second = tmp_path / "20261105T1826Z_aaaaaaa", tmp_path / "20261106T0100Z_bbbbbbb"
+    first.mkdir()
+    second.mkdir()
+    bench.update_latest(tmp_path, first)
+    bench.update_latest(tmp_path, second)
+    latest = tmp_path / "latest"
+    assert latest.is_symlink() and latest.resolve() == second.resolve()
+    assert not (tmp_path / ".latest.tmp").exists()
