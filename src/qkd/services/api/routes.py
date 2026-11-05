@@ -152,6 +152,24 @@ async def cancel_transfer(transfer_id: str, request: Request) -> Transfer:
     return await _service(request).cancel(transfer_id)
 
 
+# include_in_schema=False: tests/services/test_api.py::test_openapi_schema_and_docs pins the exact set of
+# documented paths and must stay unmodified. To list this route in /docs, drop the flag and add the path
+# to that test (docs/plans/resume.md, decision D13).
+@router.post(
+    "/transfers/{transfer_id}/resume", response_model=Transfer, status_code=status.HTTP_202_ACCEPTED, tags=["transfers"],
+    include_in_schema=False,
+    summary="Resume an interrupted outgoing transfer",
+    description=(
+        "Only the sender can resume, and only a transfer in `interrupted`. The transfer goes back to "
+        "`pending` and is offered to the receiver again with the same id. Once the receiver accepts, a new "
+        "key exchange runs and only the part of the file the receiver has not yet verified is sent."
+    ),
+    responses={202: {"model": Transfer, "description": "Re-offered to the receiver"}, **_errors(404, 409, 422, 502)},
+)
+async def resume_transfer(transfer_id: str, request: Request) -> Transfer:
+    return await _service(request).resume(transfer_id)
+
+
 @router.get(
     "/transfers/{transfer_id}/events", tags=["transfers"], response_class=StreamingResponse,
     summary="Server-sent event stream of protocol events",

@@ -163,6 +163,7 @@ One commit per milestone on `feature/resume`.
 - **D9 Resume messages are AEAD-protected with HKDF subkeys**, not the file key, and bound to `T`.
 - **D10 `sha256` goes into the metadata only in resume mode**, so the metadata message (and its AAD) is unchanged otherwise.
 - **D11 Tampered resume request or grant is a `PeerAuthError`** (outcome `aborted_auth`).
+- **D13 `POST /transfers/{id}/resume` is left out of the OpenAPI schema** (`include_in_schema=False`). `test_openapi_schema_and_docs` asserts the exact set of documented paths and the brief requires existing tests to pass unmodified. The route works and is covered by tests; it is documented in the README and CLAUDE.md. Listing it in `/docs` needs that one test to learn the new path.
 - **D12 `QKD_RESUME_SYNC_CHUNKS` = 8**: a hard kill re-sends at most 7 verified chunks; the cost is one fsync per 8 chunks.
 
 ## 5. Risks

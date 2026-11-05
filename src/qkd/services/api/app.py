@@ -28,7 +28,11 @@ resources to coordinate a transfer: the sender POSTs `/transfers/incoming` on th
 receiver, and the receiver PATCHes the sender's transfer to accept or reject.
 
 Transfer statuses: `pending -> accepted -> key_exchange -> transferring -> completed`,
-with `rejected`, `aborted_qber`, `failed`, and `cancelled` as terminal states.
+with `rejected`, `aborted_qber`, `aborted_auth`, `failed`, and `cancelled` as terminal states.
+
+With `QKD_RESUME=1` a transfer that stops after key confirmation becomes `interrupted` (not terminal).
+The sender resumes it with `POST /transfers/{id}/resume`; only the part of the file the receiver has
+not yet verified is sent, under a fresh key.
 """
 
 
