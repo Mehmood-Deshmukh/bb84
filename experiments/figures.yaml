@@ -30,6 +30,8 @@ figures:
     facet: mode
     facet_order: [none, hybrid]
     facet_label: "mode: {}"
+    x_rotation: 45
+    size: [10, 3.8]
     xlabel: Eve's intercept fraction f
     title: Where each run stops (N = 8192, all checks on)
 

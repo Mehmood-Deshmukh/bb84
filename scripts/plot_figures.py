@@ -253,7 +253,9 @@ def render_stacked(fig: dict, rows: list[dict]) -> plt.Figure:
     facet_key = fig.get("facet")
     facets = series_values(rows, facet_key, fig.get("facet_order"))
     outcomes = [o for o in OUTCOME_LABELS if any(r.get(f"rate_{o}", 0) > 0 for r in rows)]
-    colors = dict(zip(outcomes, colors_for(outcomes, False)))
+    # Fixed slot per outcome (OUTCOME_LABELS order), so an outcome keeps its color in
+    # every figure, whichever other outcomes happen to be present
+    colors = dict(zip(OUTCOME_LABELS, CATEGORICAL))
     figure, axes = plt.subplots(1, len(facets), figsize=fig.get("size", (3.2 * len(facets), 3.4)),
                                 sharey=True, squeeze=False)
     for ax, facet in zip(axes[0], facets):
@@ -266,6 +268,8 @@ def render_stacked(fig: dict, rows: list[dict]) -> plt.Figure:
                    edgecolor="white", linewidth=1.0, label=OUTCOME_LABELS[outcome])
             bottom = [b + h for b, h in zip(bottom, heights)]
         ax.set_xticks(list(positions), [fig.get("x_format", "{}").format(r[fig["x"]]) for r in pts])
+        if fig.get("x_rotation"):
+            ax.tick_params(axis="x", labelrotation=fig["x_rotation"])
         ax.set_xlabel(fig.get("xlabel", fig["x"]))
         ax.set_title(fig.get("facet_label", "{}").format(facet), loc="left", fontsize=9)
         ax.grid(axis="x", visible=False)
