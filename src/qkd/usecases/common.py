@@ -6,11 +6,27 @@ from dataclasses import dataclass
 from typing import Literal, Optional, Protocol, runtime_checkable
 
 from qkd.core.bb84_protocol import qber_exceeds_threshold
+from qkd.core.config import ProtocolParams
+from qkd.core.finite_key import secure_key_length
 from qkd.services.reporting import Reporter
 
 
 class PeerAuthError(Exception):
     """Raised when peer authentication or verification fails."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class KeyConfirmationError(Exception):
+    """
+    Raised when the peer's key confirmation tag does not match: the two keys differ.
+
+    The peer's signature over the transcript has already verified by then, so this
+    is not an identity failure. On a noiseless channel it means the quantum channel
+    was disturbed in bits the QBER sample did not catch.
+    """
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -53,6 +69,8 @@ class KeyExchangeResult:
     qber: float
     threshold: float
     key: Optional[bytes]  # None when the exchange aborted
+    secure_bits: Optional[int] = None  # finite-key bound; None if the exchange aborted on QBER first
+    abort_reason: Optional[str] = None  # set when key is None
 
     @property
     def aborted(self) -> bool:
@@ -69,6 +87,30 @@ def report_qber_verdict(qber: float, threshold: float, sample_size: int, reporte
         return True
     reporter.success(f"{verdict} — Channel is SECURE")
     return False
+
+
+def finite_key_verdict(
+    kept_bits: int, sample_size: int, qber: float, params: ProtocolParams, reporter: Reporter
+) -> tuple[int, Optional[str]]:
+    """
+    Compute the finite-key secure length and decide whether to abort.
+
+    Both peers call this with the same public values (kept bits, sample size,
+    the QBER Alice announced, and the bound security policy), so they reach the
+    same verdict without sending it. Returns (secure_bits, abort_reason or None).
+    """
+    secure = secure_key_length(kept_bits, sample_size, qber, params.eps_sec, params.eps_cor)
+    reporter.metrics(secure_key_bits=secure)
+    if secure >= params.final_key_bits:
+        reporter.success(f"Finite-key bound: {secure} secure bits >= {params.final_key_bits} needed")
+        return secure, None
+    reason = (f"finite-key bound gives {secure} secure bits, {params.final_key_bits} needed "
+              f"(kept {kept_bits}, sample {sample_size}, QBER {qber:.2%})")
+    if not params.enforce_finite_key:
+        reporter.warning(f"{reason}; continuing because enforce_finite_key is off (key NOT provably secure)")
+        return secure, None
+    reporter.error(reason)
+    return secure, reason
 
 
 def report_summary(kx: KeyExchangeResult, num_chunks: int, chunk_size: int, reporter: Reporter) -> None:

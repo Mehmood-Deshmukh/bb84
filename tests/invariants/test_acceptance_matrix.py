@@ -37,7 +37,7 @@ import tests.invariants.test_signed_handshake as tsh
 import tests.invariants.test_tamper as tt
 from tests.invariants.support import keys  # noqa: F401 - pytest fixture
 
-PARAMS = ProtocolParams(num_qubits=48)
+PARAMS = ProtocolParams()  # default N with the finite-key gate on
 
 
 class DummyVerifier:
@@ -133,7 +133,7 @@ def test_acceptance_item_6_tamper_classical_messages_aborts(step, tamper, keys, 
 
 
 def test_acceptance_item_6_metadata_tamper_aborts(keys, parallel, make_file, tmp_path: Path) -> None:
-    """Item 6: File metadata tampering is caught by AES-GCM chunk AAD."""
+    """Item 6: File metadata tampering is caught by the metadata's own AES-GCM tag."""
     tt.test_metadata_tamper_caught_by_aad(keys, parallel, make_file, tmp_path)
 
 

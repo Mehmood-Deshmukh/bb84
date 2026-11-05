@@ -27,7 +27,7 @@ from qkd.services.reporting import (
     Reporter,
 )
 from qkd.services.wire import connect_with_retry
-from qkd.usecases.common import PeerAuthError
+from qkd.usecases.common import KeyConfirmationError, PeerAuthError
 from qkd.usecases.send_file import send_file
 
 
@@ -116,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with sock:
             result = send_file(sock, args.file, reporter, auth=auth)
+    except KeyConfirmationError as exc:
+        reporter.error(f"Key confirmation FAILED: {exc.reason}")
+        reporter.result(OUTCOME_ABORTED_QBER, exc.reason)
+        return 1
     except PeerAuthError as exc:
         reporter.error(f"Authentication FAILED: {exc.reason}")
         reporter.result(OUTCOME_ABORTED_AUTH, exc.reason)
@@ -125,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         reporter.result(OUTCOME_FAILED, str(exc) or type(exc).__name__)
         return 1
     if result.aborted:
-        reporter.result(OUTCOME_ABORTED_QBER, f"QBER {result.qber:.2%} >= threshold {result.threshold:.0%}")
+        reporter.result(OUTCOME_ABORTED_QBER, result.abort_reason)
         return 1
     reporter.result(OUTCOME_COMPLETED)
     return 0

@@ -11,6 +11,8 @@ dist/
 received/
 history.json
 identity/
+id-*/
+*.seed
 known_peers.json
 experiments/results/
 experiments/figures/

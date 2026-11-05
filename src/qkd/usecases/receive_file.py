@@ -18,7 +18,13 @@ from qkd.core.quantum_channel import measure_qubits
 from qkd.services.file_stream import receive_encrypted_file, receive_file_meta, received_path
 from qkd.services.reporting import Reporter
 from qkd.services.transcript import TranscriptChannel
-from qkd.usecases.common import AuthContext, KeyExchangeResult, report_qber_verdict, report_summary
+from qkd.usecases.common import (
+    AuthContext,
+    KeyExchangeResult,
+    finite_key_verdict,
+    report_qber_verdict,
+    report_summary,
+)
 from qkd.usecases.handshake import bob_finished, bob_hello, session_key
 
 
@@ -85,21 +91,26 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     result = dict(raw_qubits=raw, sifted_length=len(sifted), sample_size=len(sample_indices),
                   qber=qber, threshold=params.qber_threshold)
     if report_qber_verdict(qber, params.qber_threshold, len(sample_indices), reporter):
-        return KeyExchangeResult(key=None, **result)
+        reason = f"QBER {qber:.2%} >= threshold {params.qber_threshold:.0%}"
+        return KeyExchangeResult(key=None, abort_reason=reason, **result)
+
+    # No reconciliation: the channel is noiseless, so the kept bits should match
+    # Alice's. If they do not, key confirmation (4b) or chunk 0 catches it.
+    kept = discard_indices(sifted, sample_indices)
+    # Count distinct positions, so a repeated index cannot inflate the sample size
+    secure, reason = finite_key_verdict(len(kept), len(set(sample_indices)), qber, params, reporter)
+    if reason is not None:
+        return KeyExchangeResult(key=None, secure_bits=secure, abort_reason=reason, **result)
 
     reporter.stage("privacy_amplification")
     reporter.section("Phase 4: Key Distillation")
-    # No reconciliation: the channel is noiseless, so the remaining bits already match Alice's.
-    reporter.info("Aligning keys...")
-    remaining = discard_indices(sifted, sample_indices)
-
-    reporter.info("Receiving privacy amplification salt...")
+    reporter.info("Receiving privacy amplification seed...")
     salt = bytes.fromhex(channel.recv_json()["salt"])
-    reporter.info("Privacy amplification (SHA-256 universal hashing)...")
-    _, key = privacy_amplification(remaining, salt=salt)
+    reporter.info(f"Privacy amplification (Toeplitz hashing, {len(kept)} -> {params.final_key_bits} bits)...")
+    _, key = privacy_amplification(kept, params.final_key_bits, salt=salt)
     reporter.success(f"Final key: {len(key) * 8}-bit AES key derived")
     reporter.metrics(key_bits=len(key) * 8)
-    return KeyExchangeResult(key=key, **result)
+    return KeyExchangeResult(key=key, secure_bits=secure, **result)
 
 
 def receive_file(
@@ -112,29 +123,33 @@ def receive_file(
     """
     Authenticate Alice, run the key exchange and, unless it aborts, receive the file into output_dir.
 
-    Raises PeerAuthError if the hello or finished exchange fails; nothing is
-    decrypted or written before Alice's finished signature verifies.
-    Raises cryptography.exceptions.InvalidTag if a chunk fails authentication.
+    Raises PeerAuthError if the hello or finished signature check fails, and
+    KeyConfirmationError if Alice's signature is valid but her key differs from
+    Bob's; nothing is decrypted or written before both checks pass.
+    Raises cryptography.exceptions.InvalidTag if a chunk fails authentication,
+    and file_stream.MetadataError if the metadata is malformed or its chunk
+    count does not match its sizes (checked before any file is created).
     """
     channel = TranscriptChannel(sock, "bob")
     reporter.stage("authentication")
     reporter.section("Phase 0: Authentication (Hello Exchange)")
-    handshake = bob_hello(channel, auth, reporter)
+    handshake = bob_hello(channel, auth, reporter, params)
 
     kx = run_key_exchange(channel, params, reporter)
     if kx.aborted:
         return ReceiveResult(kx)
 
     transcript_hash = channel.digest()
+    key = session_key(kx.key, handshake, transcript_hash)
     if handshake.signed:
         reporter.stage("key_confirmation")
-        reporter.section("Key Confirmation (Signed Transcript)")
-        bob_finished(channel, auth, handshake, transcript_hash, reporter)
+        reporter.section("Key Confirmation (Signed Transcript + Key Tag)")
+        bob_finished(channel, auth, handshake, transcript_hash, key, reporter)
 
     reporter.stage("file_transfer")
     reporter.section("Phase 5: Secure File Reception (Chunked Streaming)")
     reporter.info("Receiving encrypted file metadata...")
-    meta = receive_file_meta(sock)
+    meta = receive_file_meta(sock, key)
     reporter.info(f"File: {meta.filename} ({meta.total_size} bytes, {meta.num_chunks} chunks of {meta.chunk_size // 1024} KB)")
 
     os.makedirs(output_dir, exist_ok=True)
@@ -147,7 +162,6 @@ def receive_file(
         if done % 100 == 0 or done == total:
             reporter.info(f"  Decrypted chunk {done}/{total} ({done / total * 100:.1f}%)")
 
-    key = session_key(kx.key, handshake, transcript_hash)
     written = receive_encrypted_file(sock, meta, output_path, key, on_progress)
     reporter.success(f"File decrypted and saved as '{output_path}' ({written} bytes)")
     reporter.success(f"All {meta.num_chunks} chunk authentication tags verified!")

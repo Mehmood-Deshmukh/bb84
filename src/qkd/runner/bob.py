@@ -26,7 +26,7 @@ from qkd.services.reporting import (
     JsonEventReporter,
 )
 from qkd.services.wire import listen
-from qkd.usecases.common import PeerAuthError
+from qkd.usecases.common import KeyConfirmationError, PeerAuthError
 from qkd.usecases.receive_file import receive_file
 
 
@@ -114,6 +114,10 @@ def main(argv: list[str] | None = None) -> int:
         with conn:
             try:
                 result = receive_file(conn, args.output_dir, reporter, auth=auth)
+            except KeyConfirmationError as exc:
+                reporter.error(f"Key confirmation FAILED: {exc.reason}")
+                reporter.result(OUTCOME_ABORTED_QBER, exc.reason)
+                return 1
             except PeerAuthError as exc:
                 reporter.error(f"Authentication FAILED: {exc.reason}")
                 reporter.result(OUTCOME_ABORTED_AUTH, exc.reason)
@@ -126,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
 
     kx = result.key_exchange
     if kx.aborted:
-        reporter.result(OUTCOME_ABORTED_QBER, f"QBER {kx.qber:.2%} >= threshold {kx.threshold:.0%}")
+        reporter.result(OUTCOME_ABORTED_QBER, kx.abort_reason)
         return 1
     reporter.metrics(output_path=result.output_path, bytes_written=result.bytes_written)
     reporter.result(OUTCOME_COMPLETED)

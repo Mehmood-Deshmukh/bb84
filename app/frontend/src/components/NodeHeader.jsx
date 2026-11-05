@@ -84,7 +84,7 @@ export default function NodeHeader({ node, busy, error, onRename }) {
           </div>
         )}
         {node ? (
-          <dl className="flex flex-wrap items-center gap-x-6 gap-y-1 text-small text-ink-2">
+          <dl className="flex min-w-0 flex-wrap items-center gap-x-6 gap-y-1 text-small text-ink-2">
             <div className="flex gap-1.5">
               <dt>Address</dt>
               <dd translate="no" className="font-mono text-ink">{node.host}:{node.port}</dd>
@@ -111,7 +111,7 @@ export default function NodeHeader({ node, busy, error, onRename }) {
             ) : null}
           </dl>
         ) : null}
-        <p className="text-small text-ink-2 sm:ml-auto">BB84 key exchange, AES-256-GCM transfer</p>
+        <p className="w-full text-small text-ink-2 2xl:ml-auto 2xl:w-auto">BB84 key exchange, AES-256-GCM transfer</p>
       </div>
       {error ? (
         <p role="alert" className="border-t border-rule bg-paper px-4 py-2 text-small text-danger sm:px-6">

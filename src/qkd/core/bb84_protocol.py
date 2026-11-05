@@ -4,7 +4,7 @@ BB84 key distillation steps used by Alice and Bob.
   1. Random bit and basis generation (Qiskit Aer as a quantum RNG)
   2. Basis sifting over the classical channel
   3. QBER estimation on a revealed sample, abort at or above the threshold
-  4. Privacy amplification (SHA-256 over salt + remaining bits)
+  4. Finite-key length check, then privacy amplification by Toeplitz hashing
 
 There is no information reconciliation step: the simulated channel is
 noiseless, so Alice's and Bob's remaining sifted bits already agree.
@@ -15,10 +15,10 @@ References:
 """
 
 from __future__ import annotations
-import random
-import hashlib
-import struct
+import secrets
 from typing import Optional
+
+import numpy as np
 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import Aer
@@ -31,6 +31,12 @@ from qkd.core.config import (
 
 
 _qrng_backend = Aer.get_backend("qasm_simulator")
+
+# Sample positions and the privacy amplification salt come from the OS CSPRNG.
+# The random module (Mersenne Twister) is predictable once enough of its output
+# has been observed, and predictable sample positions would let an eavesdropper
+# avoid the bits that are checked.
+_csprng = secrets.SystemRandom()
 
 
 def _quantum_random_bits(n: int) -> list[int]:
@@ -76,10 +82,10 @@ def choose_sample_indices(n: int, sample_fraction: float = QBER_SAMPLE_FRACTION)
     Pick the sifted positions that Alice and Bob reveal to estimate the QBER.
 
     These bits are disclosed over the classical channel and are removed from
-    the key afterwards.
+    the key afterwards. The positions are drawn from the OS CSPRNG.
     """
     sample_size = max(1, int(n * sample_fraction))
-    return sorted(random.sample(range(n), min(sample_size, n)))
+    return sorted(_csprng.sample(range(n), min(sample_size, n)))
 
 
 def compute_qber(alice_sample: list[int], bob_sample: list[int]) -> float:
@@ -114,44 +120,53 @@ def discard_indices(bits: list[int], indices: list[int]) -> list[int]:
     return [b for i, b in enumerate(bits) if i not in drop]
 
 
+def toeplitz_seed_bytes(n: int, m: int) -> int:
+    """Bytes of seed needed to hash n bits down to m bits with a Toeplitz matrix (n + m - 1 bits)."""
+    return (n + m - 1 + 7) // 8
+
+
+def toeplitz_hash(bits: list[int], seed: bytes, m: int) -> bytes:
+    """
+    Multiply the n-bit vector `bits` by an m x n binary Toeplitz matrix, over GF(2).
+
+    The matrix is T[i][j] = s[i - j + n - 1], where s is the first n + m - 1 bits
+    of `seed` (most significant bit first). A product with a Toeplitz matrix is a
+    convolution, so y[i] = (s * bits)[i + n - 1] mod 2. Returns m bits packed into
+    bytes, most significant bit first (m must be a multiple of 8).
+    """
+    n = len(bits)
+    if n == 0 or m <= 0 or m % 8:
+        raise ValueError("toeplitz_hash needs at least one input bit and a positive multiple of 8 output bits")
+    if len(seed) != toeplitz_seed_bytes(n, m):
+        raise ValueError(f"Toeplitz seed must be {toeplitz_seed_bytes(n, m)} bytes, got {len(seed)}")
+    s = np.unpackbits(np.frombuffer(seed, dtype=np.uint8))[: n + m - 1].astype(np.int64)
+    x = np.asarray(bits, dtype=np.int64)
+    y = np.convolve(s, x)[n - 1 : n - 1 + m] & 1
+    return np.packbits(y.astype(np.uint8)).tobytes()
+
+
 def privacy_amplification(
     key_bits: list[int],
     target_bits: int = FINAL_KEY_BITS,
     salt: Optional[bytes] = None,
 ) -> tuple[bytes, bytes]:
     """
-    Privacy amplification via universal hashing.
+    Privacy amplification with a random Toeplitz matrix (a two-universal hash family).
 
-    Eve may have partial information about the sifted key. Privacy amplification compresses the key using a hash
-    function, reducing Eve's knowledge to negligibly small.
+    By the leftover hash lemma, hashing the kept bits down to target_bits with a
+    randomly chosen member of a two-universal family leaves Eve's information
+    about the result bounded as in core/finite_key.py, provided target_bits is no
+    more than the secure length computed there. The caller checks that bound.
 
-    Theory (Bennett, Brassard, Robert, 1988):
-      If Eve has at most `t` bits of Rényi entropy about the key,
-      then hashing the n-bit key to (n - t - s) bits ensures Eve's
-      information is bounded by 2^(-s/2).
-
-    We use SHA-256 as the universal hash function, producing a
-    256-bit key suitable for AES-256.
-
-    The salt ensures different runs produce different keys even
-    with the same raw bits (simulating a random hash function
-    choice from a universal family).
+    `salt` is the Toeplitz seed. Alice draws it from the OS CSPRNG and sends it
+    in the clear; Bob passes the one he received.
 
     Returns:
-        (salt, key) where key is `target_bits // 8` bytes.
+        (salt, key) where key is target_bits // 8 bytes.
     """
-    key_bytes = bits_to_bytes(key_bits)
-
     if salt is None:
-        salt = struct.pack(">Q", random.getrandbits(64))
-
-    h = hashlib.sha256()
-    h.update(salt)
-    h.update(key_bytes)
-    digest = h.digest()
-
-    target_bytes = target_bits // 8
-    return salt, digest[:target_bytes]
+        salt = secrets.token_bytes(toeplitz_seed_bytes(len(key_bits), target_bits))
+    return salt, toeplitz_hash(key_bits, salt, target_bits)
 
 
 def bits_to_bytes(bits: list[int]) -> bytes:

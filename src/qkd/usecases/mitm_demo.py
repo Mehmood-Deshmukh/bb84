@@ -18,7 +18,9 @@ Two strategies:
              runs Bob's side of the key exchange against Alice, so her transcript
              matches Alice's. At the finished step she can only sign with her own key,
              so Alice's signature check rejects her. Bob, never sent any qubits, is
-             released when she closes his socket.
+             released when she closes his socket. Even if she held Bob's signing
+             key, in hybrid mode the relayed KEM ciphertext is Bob's, so she lacks
+             the KEM secret and her key confirmation tag is wrong.
 """
 
 from __future__ import annotations
@@ -37,16 +39,17 @@ from cryptography.exceptions import InvalidTag
 from qkd.core import pqc
 from qkd.core.config import ProtocolParams
 from qkd.services import wire
+from qkd.services.file_stream import MetadataError
 from qkd.services.reporting import NullReporter, Reporter
 from qkd.services.transcript import TranscriptChannel
 from qkd.usecases import receive_file as bob_flow
 from qkd.usecases import send_file as alice_flow
-from qkd.usecases.common import AuthContext, PeerAuthError
-from qkd.usecases.handshake import FINISHED_PREFIX
+from qkd.usecases.common import AuthContext, KeyConfirmationError, PeerAuthError
+from qkd.usecases.handshake import HandshakeState, confirmation_tag, finished_message, session_key
 
 Identity = tuple[bytes, bytes]
 # Everything a protocol leg can fail with; never lets one propagate out of run_mitm.
-_LEG_ERRORS = (PeerAuthError, ConnectionError, OSError, InvalidTag)
+_LEG_ERRORS = (PeerAuthError, KeyConfirmationError, MetadataError, ConnectionError, OSError, InvalidTag)
 
 
 class AcceptAnyVerifier:
@@ -115,8 +118,7 @@ def _own_key(
             if result.output_path is not None:
                 path = result.output_path
             else:
-                kx = result.key_exchange
-                alice_error = f"qber {kx.qber:.2%} >= threshold {kx.threshold:.0%}"
+                alice_error = result.key_exchange.abort_reason
         except _LEG_ERRORS as exc:
             alice_error = _reason(exc)
 
@@ -169,17 +171,20 @@ def _relay_hello(
         if kx.aborted:
             # Alice detected the (nonexistent) eavesdropper and will send no salt; there is
             # nothing to sign over. Record the QBER reason, as _own_key does, and stop.
-            reporter.warning("Alice aborted on QBER; no finished to forge")
-            return MitmResult(
-                "relay_hello", mode, None, 0,
-                f"qber {kx.qber:.2%} >= threshold {kx.threshold:.0%}", None, False,
-            )
+            reporter.warning("Alice aborted before key confirmation; no finished to forge")
+            return MitmResult("relay_hello", mode, None, 0, kx.abort_reason, None, False)
         transcript_hash = channel.digest()
 
-        # 4b: she holds no Bob seed, so she signs with her own key; Alice will reject it.
-        reporter.info("Sending a finished signed with Mallory's key")
-        signature = pqc.sign(seed, FINISHED_PREFIX + b"bob|" + transcript_hash)  # cf. handshake._finished
-        channel.send_untracked({"finished": base64.b64encode(signature).decode()})
+        # 4b: her best key. She knows the BB84 key she shares with Alice, but in
+        # hybrid mode the KEM secret is between Alice and the real Bob, so she guesses.
+        kem_guess = os.urandom(32) if mode == "hybrid" else None
+        key = session_key(kx.key, HandshakeState(mode, kem_ss=kem_guess), transcript_hash)
+        tag = confirmation_tag(key, b"bob", transcript_hash)
+        # She signs with whatever seed she holds (her own, unless the test hands her Bob's)
+        reporter.info("Sending a finished signed with the seed Mallory holds")
+        signature = pqc.sign(seed, finished_message(b"bob", transcript_hash, tag))  # cf. handshake._finished
+        channel.send_untracked({"finished": base64.b64encode(signature).decode(),
+                                "confirm": base64.b64encode(tag).decode()})
         # Wait for Alice's reaction so the finished is delivered before we close.
         try:
             channel.recv_untracked()

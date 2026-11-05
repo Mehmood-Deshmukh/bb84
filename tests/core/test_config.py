@@ -23,7 +23,24 @@ def read_config(env: dict[str, str], *names: str) -> dict:
 
 def test_defaults() -> None:
     values = read_config({}, "NUM_QUBITS", "QBER_THRESHOLD", "CHUNK_SIZE", "BOB_PORT")
-    assert values == {"NUM_QUBITS": 128, "QBER_THRESHOLD": 0.11, "CHUNK_SIZE": 65536, "BOB_PORT": 65432}
+    assert values == {"NUM_QUBITS": 8192, "QBER_THRESHOLD": 0.11, "CHUNK_SIZE": 65536, "BOB_PORT": 65432}
+
+
+def test_finite_key_defaults_and_overrides() -> None:
+    names = ("EPS_SEC", "EPS_COR", "ENFORCE_FINITE_KEY", "FINAL_KEY_BITS")
+    assert read_config({}, *names) == {"EPS_SEC": 1e-10, "EPS_COR": 1e-15, "ENFORCE_FINITE_KEY": True,
+                                       "FINAL_KEY_BITS": 256}
+    env = {"QKD_EPS_SEC": "1e-6", "QKD_EPS_COR": "1e-9", "QKD_ENFORCE_FINITE_KEY": "false"}
+    assert read_config(env, *names[:3]) == {"EPS_SEC": 1e-6, "EPS_COR": 1e-9, "ENFORCE_FINITE_KEY": False}
+
+
+def test_security_policy_lists_the_values_peers_must_share() -> None:
+    from qkd.core.config import ProtocolParams
+
+    policy = ProtocolParams(final_key_bits=128, eps_sec=1e-6, eps_cor=1e-9, qber_threshold=0.05,
+                            enforce_finite_key=False).security_policy()
+    assert policy == {"final_key_bits": 128, "eps_sec": 1e-6, "eps_cor": 1e-9, "qber_threshold": 0.05,
+                      "enforce_finite_key": False}
 
 
 def test_env_overrides() -> None:

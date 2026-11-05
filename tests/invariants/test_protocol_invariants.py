@@ -31,7 +31,7 @@ from qkd.usecases.receive_file import receive_file
 from qkd.usecases.send_file import send_file
 from tests.invariants.support import proxy
 
-PARAMS = ProtocolParams(num_qubits=48)
+PARAMS = ProtocolParams()  # default N with the finite-key gate on
 
 
 def test_same_key_on_both_sides_without_eve(connected) -> None:

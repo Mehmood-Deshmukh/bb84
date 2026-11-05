@@ -33,7 +33,7 @@ from tests.invariants.support import (
     keys,
 )
 
-PARAMS = ProtocolParams(num_qubits=64)
+PARAMS = ProtocolParams()  # default N with the finite-key gate on
 # Sample every sifted bit and abort on any error, so Eve's ~25% disturbance is caught
 # with overwhelming probability at 64 qubits (an honest channel has QBER exactly 0).
 EVE_PARAMS = ProtocolParams(num_qubits=64, qber_sample_fraction=1.0, qber_threshold=0.01)

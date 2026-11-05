@@ -16,19 +16,25 @@ from typing import Any, Callable
 import pytest
 
 from qkd.core import pqc
+from qkd.core.config import ProtocolParams
 from qkd.core.crypto_utils import derive_aes_key
 from qkd.services.reporting import NullReporter
 from qkd.services.transcript import TranscriptChannel
 from qkd.services.wire import recv_json, send_json
-from qkd.usecases.common import AuthContext, PeerAuthError
+from qkd.usecases.common import AuthContext, KeyConfirmationError, PeerAuthError
 from qkd.usecases.handshake import (
+    PROTOCOL_VERSION,
     HandshakeState,
     alice_finished,
     alice_hello,
     bob_finished,
     bob_hello,
+    confirmation_tag,
+    finished_message,
     session_key,
 )
+
+POLICY = ProtocolParams().security_policy()
 
 
 class PinnedVerifier:
@@ -78,9 +84,9 @@ def b64(data: bytes) -> str:
 @pytest.mark.parametrize(
     "mode, fields",
     [
-        ("none", {"v", "mode"}),
-        ("sign", {"v", "mode", "id_pk", "nonce"}),
-        ("hybrid", {"v", "mode", "id_pk", "nonce", "kem_pk"}),
+        ("none", {"v", "mode", "params"}),
+        ("sign", {"v", "mode", "params", "id_pk", "nonce"}),
+        ("hybrid", {"v", "mode", "params", "id_pk", "nonce", "kem_pk"}),
     ],
 )
 def test_alice_hello_contents(mode: str, fields: set[str], keys, parallel) -> None:
@@ -93,7 +99,7 @@ def test_alice_hello_contents(mode: str, fields: set[str], keys, parallel) -> No
         )
     hello = msg["hello"]
     assert set(hello) == fields
-    assert (hello["v"], hello["mode"]) == (1, mode)
+    assert (hello["v"], hello["mode"], hello["params"]) == (2, mode, POLICY)
     if mode != "none":
         assert base64.b64decode(hello["id_pk"]) == keys["alice"][0]
         assert len(base64.b64decode(hello["nonce"])) == 32
@@ -104,8 +110,8 @@ def test_alice_hello_contents(mode: str, fields: set[str], keys, parallel) -> No
 def test_bob_hybrid_hello_carries_kem_ct_for_alice_kem_pk(keys, parallel) -> None:
     _, bob_auth = contexts(keys, "hybrid")
     kem_pk, kem_seed = pqc.kem_keygen()
-    alice_hello_msg = {"hello": {"v": 1, "mode": "hybrid", "id_pk": b64(keys["alice"][0]),
-                                 "nonce": b64(os.urandom(32)), "kem_pk": b64(kem_pk)}}
+    alice_hello_msg = {"hello": {"v": PROTOCOL_VERSION, "mode": "hybrid", "params": POLICY,
+                                 "id_pk": b64(keys["alice"][0]), "nonce": b64(os.urandom(32)), "kem_pk": b64(kem_pk)}}
 
     def play_alice() -> Any:
         send_json(a, alice_hello_msg)
@@ -118,7 +124,7 @@ def test_bob_hybrid_hello_carries_kem_ct_for_alice_kem_pk(keys, parallel) -> Non
             closing(b, lambda: bob_hello(TranscriptChannel(b, "bob"), bob_auth, NullReporter())),
         )
     hello = msg["hello"]
-    assert set(hello) == {"v", "mode", "id_pk", "nonce", "kem_ct"}
+    assert set(hello) == {"v", "mode", "params", "id_pk", "nonce", "kem_ct"}
     assert base64.b64decode(hello["id_pk"]) == keys["bob"][0]
     assert pqc.kem_decaps(kem_seed, base64.b64decode(hello["kem_ct"])) == state.kem_ss
     assert state.peer_trust == "pinned"
@@ -136,7 +142,8 @@ def test_bob_hybrid_hello_carries_kem_ct_for_alice_kem_pk(keys, parallel) -> Non
 )
 def test_malformed_bob_hello_raises_peer_auth_error(mode: str, bad_fields: dict, keys, parallel) -> None:
     alice_auth, _ = contexts(keys, mode)
-    fields = {"v": 1, "mode": mode, "id_pk": b64(keys["bob"][0]), "nonce": b64(os.urandom(32))}
+    fields = {"v": PROTOCOL_VERSION, "mode": mode, "params": POLICY, "id_pk": b64(keys["bob"][0]),
+              "nonce": b64(os.urandom(32))}
     if mode == "hybrid":
         fields["kem_ct"] = b64(os.urandom(1088))
     fields.update(bad_fields)
@@ -183,9 +190,44 @@ def test_alice_peer_closed_during_hello(keys, parallel) -> None:
     assert err.reason == "peer closed connection during authentication"
 
 
+def _run_finished(keys, parallel, alice_key: bytes, bob_key: bytes, mode: str = "sign") -> tuple[Any, Any]:
+    """Hellos, a stand-in tracked salt, then the real finished exchange with each side's key."""
+    alice_auth, bob_auth = contexts(keys, mode)
+
+    def alice(sock: socket.socket) -> None:
+        ch = TranscriptChannel(sock, "alice")
+        state = alice_hello(ch, alice_auth, NullReporter())
+        ch.send_json({"salt": "00" * 16})
+        alice_finished(ch, alice_auth, state, ch.digest(), alice_key, NullReporter())
+
+    def bob(sock: socket.socket) -> None:
+        ch = TranscriptChannel(sock, "bob")
+        state = bob_hello(ch, bob_auth, NullReporter())
+        ch.recv_json()
+        bob_finished(ch, bob_auth, state, ch.digest(), bob_key, NullReporter())
+
+    a, b = socket.socketpair()
+    with a, b:
+        return parallel(closing(a, lambda: alice(a)), closing(b, lambda: bob(b)))
+
+
+def test_finished_with_same_key_passes(keys, parallel) -> None:
+    key = os.urandom(32)
+    assert list(_run_finished(keys, parallel, key, key)) == [None, None]
+
+
+def test_different_keys_fail_key_confirmation_not_authentication(keys, parallel) -> None:
+    # Same transcript, valid signatures, different keys: what a missed channel error looks like
+    alice_err, _ = _run_finished(keys, parallel, os.urandom(32), os.urandom(32))
+    assert isinstance(alice_err, KeyConfirmationError)
+    assert not isinstance(alice_err, PeerAuthError)
+    assert "key confirmation failed" in alice_err.reason
+
+
 def test_finished_replayed_from_previous_session_is_rejected(keys, parallel) -> None:
     alice_auth, bob_auth = contexts(keys, "sign")
     salt = {"salt": "00" * 16}
+    key = os.urandom(32)
 
     # Session 1: honest Bob; the test plays Alice after the hellos and captures Bob's finished.
     def alice_capture(sock: socket.socket) -> tuple[bytes, Any]:
@@ -198,19 +240,21 @@ def test_finished_replayed_from_previous_session_is_rejected(keys, parallel) -> 
         ch = TranscriptChannel(sock, "bob")
         state = bob_hello(ch, bob_auth, NullReporter())
         ch.recv_json()
-        bob_finished(ch, bob_auth, state, ch.digest(), NullReporter())
+        bob_finished(ch, bob_auth, state, ch.digest(), key, NullReporter())
 
     a, b = socket.socketpair()
     with a, b:
         (t1, captured), _ = parallel(closing(a, lambda: alice_capture(a)), closing(b, lambda: honest_bob(b)))
-    assert pqc.verify(keys["bob"][0], b"qkd-finished-v1|bob|" + t1, base64.b64decode(captured["finished"]))
+    tag = base64.b64decode(captured["confirm"])
+    assert tag == confirmation_tag(key, b"bob", t1)
+    assert pqc.verify(keys["bob"][0], finished_message(b"bob", t1, tag), base64.b64decode(captured["finished"]))
 
     # Session 2: honest Alice; Bob runs the real hello (fresh nonces) and replays the old finished.
     def honest_alice(sock: socket.socket) -> None:
         ch = TranscriptChannel(sock, "alice")
         state = alice_hello(ch, alice_auth, NullReporter())
         ch.send_json(salt)
-        alice_finished(ch, alice_auth, state, ch.digest(), NullReporter())
+        alice_finished(ch, alice_auth, state, ch.digest(), key, NullReporter())
 
     def replaying_bob(sock: socket.socket) -> bytes:
         ch = TranscriptChannel(sock, "bob")
@@ -225,6 +269,54 @@ def test_finished_replayed_from_previous_session_is_rejected(keys, parallel) -> 
     assert t2 != t1
     assert isinstance(err, PeerAuthError)
     assert "signature" in err.reason
+
+
+def test_signature_covers_the_confirmation_tag(keys, parallel) -> None:
+    """A relay that swaps in another tag under Bob's real signature breaks the signature."""
+    alice_auth, bob_auth = contexts(keys, "sign")
+    key = os.urandom(32)
+
+    def alice(sock: socket.socket) -> None:
+        ch = TranscriptChannel(sock, "alice")
+        state = alice_hello(ch, alice_auth, NullReporter())
+        ch.send_json({"salt": "00" * 16})
+        alice_finished(ch, alice_auth, state, ch.digest(), key, NullReporter())
+
+    def bob_with_swapped_tag(sock: socket.socket) -> None:
+        ch = TranscriptChannel(sock, "bob")
+        bob_hello(ch, bob_auth, NullReporter())
+        ch.recv_json()
+        t = ch.digest()
+        good = confirmation_tag(key, b"bob", t)
+        signature = pqc.sign(keys["bob"][1], finished_message(b"bob", t, good))
+        ch.send_untracked({"finished": b64(signature), "confirm": b64(os.urandom(32))})
+        ch.recv_untracked()
+
+    a, b = socket.socketpair()
+    with a, b:
+        err, _ = parallel(closing(a, lambda: alice(a)), closing(b, lambda: bob_with_swapped_tag(b)))
+    assert isinstance(err, PeerAuthError)
+    assert "signature" in err.reason
+
+
+@pytest.mark.parametrize(
+    "bob_params",
+    [ProtocolParams(eps_sec=1e-6), ProtocolParams(final_key_bits=128), ProtocolParams(enforce_finite_key=False),
+     ProtocolParams(qber_threshold=0.2)],
+    ids=["eps_sec", "final_key_bits", "enforce_finite_key", "qber_threshold"],
+)
+@pytest.mark.parametrize("mode", ["none", "hybrid"])
+def test_parameter_mismatch_aborts_both_sides(mode: str, bob_params: ProtocolParams, keys, parallel) -> None:
+    alice_auth, bob_auth = (None, None) if mode == "none" else contexts(keys, mode)
+    a, b = socket.socketpair()
+    with a, b:
+        alice_err, bob_err = parallel(
+            closing(a, lambda: alice_hello(TranscriptChannel(a, "alice"), alice_auth, NullReporter())),
+            closing(b, lambda: bob_hello(TranscriptChannel(b, "bob"), bob_auth, NullReporter(), bob_params)),
+        )
+    for err in (alice_err, bob_err):
+        assert isinstance(err, PeerAuthError)
+        assert "parameter mismatch" in err.reason
 
 
 def test_none_mode_session_key_is_legacy_key() -> None:

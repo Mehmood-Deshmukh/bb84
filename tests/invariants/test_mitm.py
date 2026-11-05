@@ -26,13 +26,16 @@ import pytest
 from qkd.core import pqc
 from qkd.core.config import ProtocolParams
 from qkd.services.reporting import NullReporter
-from qkd.usecases.common import PeerAuthError
+from qkd.usecases.common import KeyConfirmationError, PeerAuthError
 from qkd.usecases.mitm_demo import MitmResult, run_mitm
 from qkd.usecases.receive_file import receive_file
 from qkd.usecases.send_file import send_file
 from tests.invariants.support import RecordingReporter, context, guarded, keys
 
-PARAMS = ProtocolParams(num_qubits=64)
+# These runs test authentication and tamper mechanics, not key length, so they use a
+# small N with the finite-key gate off. tests/invariants/test_finite_key_gate.py and the
+# honest-transfer tests exercise the gate at the default N.
+PARAMS = ProtocolParams(num_qubits=64, enforce_finite_key=False)
 
 
 def _run_triangle(
@@ -108,14 +111,29 @@ def test_mitm_auth_on_relay_hello(mode: str, keys, parallel, make_file, tmp_path
 
 
 def test_relay_control_with_bobs_key_passes_key_confirmation(keys, parallel, make_file, tmp_path: Path) -> None:
-    # Mallory is handed Bob's real identity, so her relayed transcript plus a valid
-    # Bob signature carry Alice past key confirmation and into file transfer. This
-    # isolates the one thing the real relay test lacks: Bob's signing key.
+    # Sign mode. Mallory is handed Bob's real identity, so her relayed transcript plus
+    # a valid Bob signature and a correct key tag (she shares the BB84 key with Alice)
+    # carry Alice past key confirmation and into file transfer. This isolates the one
+    # thing the real relay test lacks: Bob's signing key.
     src = make_file("payload.bin", 1000)
     bob_out = tmp_path / "received"
-    alice_res, _, mitm, alice_rep, _ = _run_triangle(parallel, src, bob_out, keys, "hybrid", "relay_hello", keys["bob"])
+    alice_res, _, mitm, alice_rep, _ = _run_triangle(parallel, src, bob_out, keys, "sign", "relay_hello", keys["bob"])
 
-    assert not isinstance(alice_res, PeerAuthError)
+    assert not isinstance(alice_res, (PeerAuthError, KeyConfirmationError))
     assert "key_confirmation" in alice_rep.stages
     assert "file_transfer" in alice_rep.stages
     assert "signature" not in (mitm.alice_error or "")
+
+
+def test_hybrid_relay_with_bobs_key_still_fails_key_confirmation(keys, parallel, make_file, tmp_path: Path) -> None:
+    # Hybrid mode, same stolen signing key: the signature now verifies, but the relayed
+    # KEM ciphertext is the real Bob's, so Mallory lacks the KEM secret and her key
+    # tag is wrong. Key confirmation, not authentication, stops her.
+    src = make_file("payload.bin", 1000)
+    bob_out = tmp_path / "received"
+    alice_res, _, _, alice_rep, _ = _run_triangle(parallel, src, bob_out, keys, "hybrid", "relay_hello", keys["bob"])
+
+    assert isinstance(alice_res, KeyConfirmationError)
+    assert alice_rep.stages[-1] == "key_confirmation"
+    assert "file_transfer" not in alice_rep.stages
+    assert not bob_out.exists()
