@@ -41,6 +41,7 @@
  * @property {PeerTrust|null} [peer_trust]
  * @property {number|null} [handshake_ms]
  * @property {number|null} [auth_overhead_bytes]
+ * @property {number} [attempt] 1 for the first try; each resume adds one
  * @property {number|null} [resumed_from_bytes]
  * @property {number|null} [bytes_total]
  * @property {string|null} [resume_restart_reason]

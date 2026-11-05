@@ -72,6 +72,7 @@ class Transfer(BaseModel):
     peer_trust: Optional[str] = None
     handshake_ms: Optional[float] = None
     auth_overhead_bytes: Optional[int] = None
+    attempt: int = Field(1, ge=1, description="1 for the first try; each resume of an interrupted transfer adds one")
     resumed_from_bytes: Optional[int] = Field(None, description="Bytes already verified on the receiver when this attempt started")
     bytes_total: Optional[int] = Field(None, description="Size of the file being transferred")
     resume_restart_reason: Optional[str] = Field(None, description="Why a resume started from byte 0 (source_changed, file_changed, chunk_size_changed)")

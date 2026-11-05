@@ -349,7 +349,7 @@ class NodeService:
             existing = self.repo.get(request.id)
         except TransferNotFound:
             return None
-        if (existing.direction is not Direction.incoming or existing.peer.id != request.sender.id
+        if (existing.direction is not Direction.incoming or not self._same_sender(existing, request)
                 or existing.filename != os.path.basename(request.filename) or existing.file_size != request.file_size):
             raise InvalidRequest("The resume offer does not match the interrupted transfer")
         if existing.status is not S.interrupted:
@@ -360,8 +360,29 @@ class NodeService:
         self.repo.save(transfer)
         return transfer
 
+    @staticmethod
+    def _same_sender(existing: Transfer, request: IncomingTransferRequest) -> bool:
+        """
+        Whether a resume offer comes from the node that started `existing`. Node ids are random per
+        start, so after a restart the PQC identity fingerprint (stable, persisted) is what matches;
+        ids are compared only when a fingerprint is missing on either side. This is a consistency
+        check on an unauthenticated HTTP offer: the binding that matters is the receiver runner
+        comparing the *authenticated* fingerprint with the one in its sidecar.
+        """
+        if existing.peer_fingerprint and request.sender_fingerprint:
+            return existing.peer_fingerprint == request.sender_fingerprint
+        return existing.peer.id == request.sender.id
+
+    def _find_peer_for(self, transfer: Transfer) -> Optional[PeerInfo]:
+        """The discovered peer for a transfer: by node id, else by identity fingerprint (the peer restarted)."""
+        peer = self._find_peer(transfer.peer.id)
+        if peer is None and transfer.peer_fingerprint:
+            peer = next((p for p in self.directory.peers() if p.fingerprint == transfer.peer_fingerprint), None)
+        return peer
+
     def _prepare_new_attempt(self, transfer: Transfer) -> Transfer:
         """Clear what describes the previous attempt; the new one reports its own."""
+        transfer.attempt += 1
         transfer.error = None
         transfer.stage = None
         transfer.progress = None
@@ -406,8 +427,8 @@ class NodeService:
             raise LaunchFailed("The uploaded file is no longer available")
 
         transfer = self._move(transfer_id, S.pending)
-        peer = self._find_peer(transfer.peer.id)
-        if peer is not None:  # the receiver may have moved since
+        peer = self._find_peer_for(transfer)
+        if peer is not None:  # the receiver may have moved or restarted (new node id) since
             transfer.peer = PeerRef(id=peer.id, name=peer.name, host=peer.host, port=peer.port)
         self._prepare_new_attempt(transfer)
         offer = IncomingTransferRequest(

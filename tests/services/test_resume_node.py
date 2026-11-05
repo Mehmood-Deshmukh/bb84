@@ -51,13 +51,14 @@ SIZE = 1000
 # ── scripted runners ────────────────────────────────────────────
 
 
-def runner_events(end: str, *, auth_mode: str = "hybrid", resumed_from: Optional[int] = None, listening: Optional[int] = None) -> list[dict]:
+def runner_events(end: str, *, auth_mode: str = "hybrid", resumed_from: Optional[int] = None, listening: Optional[int] = None,
+                  peer_fp: str = FP) -> list[dict]:
     """A runner that gets as far as streaming, then: end = 'completed', 'interrupted' (result event) or 'died' (no result)."""
     events = [ev("stage", "connecting")]
     if listening:
         events.append(ev("listening", "connecting", port=listening))
     events += [ev("stage", "authentication"),
-               ev("metrics", "authentication", auth_mode=auth_mode, peer_fingerprint=FP, peer_trust="pinned")]
+               ev("metrics", "authentication", auth_mode=auth_mode, peer_fingerprint=peer_fp, peer_trust="pinned")]
     events += key_exchange_events()
     events += [ev("stage", "privacy_amplification"), ev("metrics", "privacy_amplification", key_bits=256),
                ev("stage", "key_confirmation"), ev("stage", "file_transfer")]
@@ -474,18 +475,20 @@ def test_two_nodes_interrupt_resume_and_complete(tmp_path: Path) -> None:
     def alice(args: list[str]) -> FakeProcess:
         attempt["a"] += 1
         gates[-1].set()
+        fp = node_b.pqc_identity.fingerprint  # each runner reports the *other* node's real identity
         if attempt["a"] == 1:
-            return FakeProcess(runner_events("interrupted"), exit_code=1)
+            return FakeProcess(runner_events("interrupted", peer_fp=fp), exit_code=1)
         assert "--resume" in args
-        return FakeProcess(runner_events("completed", resumed_from=400))
+        return FakeProcess(runner_events("completed", resumed_from=400, peer_fp=fp))
 
     def bob(args: list[str]) -> FakeProcess:
         attempt["b"] += 1
         gates.append(threading.Event())
+        fp = node_a.pqc_identity.fingerprint
         if attempt["b"] == 1:
-            return FakeProcess(runner_events("interrupted", listening=45678), exit_code=1, gate=gates[-1], gate_at=2)
+            return FakeProcess(runner_events("interrupted", listening=45678, peer_fp=fp), exit_code=1, gate=gates[-1], gate_at=2)
         assert "--resume" in args
-        return FakeProcess(runner_events("completed", resumed_from=400, listening=45678), gate=gates[-1], gate_at=2)
+        return FakeProcess(runner_events("completed", resumed_from=400, listening=45678, peer_fp=fp), gate=gates[-1], gate_at=2)
 
     a_launcher, b_launcher = FakeLauncher(alice=alice), FakeLauncher(bob=bob)
     node_a = make_node(tmp_path, a_launcher, router, A_ID, PeerInfo(B_ID.id, B_ID.name, B_ID.host, B_ID.port))
@@ -499,9 +502,12 @@ def test_two_nodes_interrupt_resume_and_complete(tmp_path: Path) -> None:
         wait_for(a, tid, "interrupted")
         wait_for(b, tid, "interrupted")
 
+        assert a.get(f"/api/v1/transfers/{tid}").json()["attempt"] == b.get(f"/api/v1/transfers/{tid}").json()["attempt"] == 1
+
         # The sender resumes; the receiver is asked again and answers as for any offer
         assert a.post(f"/api/v1/transfers/{tid}/resume").json()["status"] == "pending"
         assert b.get(f"/api/v1/transfers/{tid}").json()["status"] == "pending"
+        assert a.get(f"/api/v1/transfers/{tid}").json()["attempt"] == b.get(f"/api/v1/transfers/{tid}").json()["attempt"] == 2
         assert b.patch(f"/api/v1/transfers/{tid}", json={"status": "accepted"}).status_code == 202
 
         done_a, done_b = wait_for(a, tid, "completed"), wait_for(b, tid, "completed")
@@ -534,3 +540,53 @@ def test_events_report_the_resume_metrics(tmp_path: Path) -> None:
             payloads = [json.loads(line[6:]) for line in resp.iter_lines() if line.startswith("data: ")]
         metrics = [e["payload"] for e in payloads if e["type"] == "metrics" and "resumed_from_bytes" in e["payload"]]
         assert metrics == [{"resumed_from_bytes": 400, "bytes_total": SIZE}]
+
+
+# ── node ids are random per start: peers are matched by identity fingerprint ──
+
+
+def receiver_with_fingerprint(root: Path):
+    return receiver_with_interrupted(root)  # its bob script reports peer_fingerprint=FP
+
+
+def test_a_restarted_sender_with_a_new_node_id_can_resume(tmp_path: Path) -> None:
+    service, _ = receiver_with_fingerprint(tmp_path)
+    with TestClient(create_app(service)) as c:
+        receive_and_interrupt(c)
+        assert c.get("/api/v1/transfers/t1").json()["peer_fingerprint"] == FP
+        resp = offer(c, sender={**SENDER, "id": "node-a-after-restart"}, sender_fingerprint=FP)
+        assert resp.status_code == 201 and resp.json()["status"] == "pending"
+        assert resp.json()["peer"]["id"] == "node-a-after-restart", "the transfer now points at the sender's new id"
+
+
+@pytest.mark.parametrize("fingerprint", ["9999-9999-9999-9999", None], ids=["other_fingerprint", "no_fingerprint"])
+def test_a_new_node_id_is_not_enough_without_a_matching_fingerprint(tmp_path: Path, fingerprint) -> None:
+    service, _ = receiver_with_fingerprint(tmp_path)
+    with TestClient(create_app(service)) as c:
+        receive_and_interrupt(c)
+        assert error_code(offer(c, sender={**SENDER, "id": "someone-else"}, sender_fingerprint=fingerprint), 422) == "invalid_request"
+        assert c.get("/api/v1/transfers/t1").json()["status"] == "interrupted"
+
+
+def test_the_same_node_id_with_a_different_fingerprint_is_refused(tmp_path: Path) -> None:
+    service, _ = receiver_with_fingerprint(tmp_path)
+    with TestClient(create_app(service)) as c:
+        receive_and_interrupt(c)
+        assert error_code(offer(c, sender_fingerprint="9999-9999-9999-9999"), 422) == "invalid_request"
+
+
+def test_a_sender_finds_a_restarted_receiver_by_its_fingerprint(tmp_path: Path) -> None:
+    service, _ = interrupted_sender(tmp_path)
+    with TestClient(create_app(service)) as c:
+        tid = upload(c)
+        start_sender(c, tid)
+        wait_for(c, tid, "interrupted")
+
+    peers = RecordingPeerClient()  # the receiver restarted too: same identity key, new node id and port
+    moved = PeerInfo(id="peer-b-after-restart", name="bob-laptop", host="10.0.0.7", port=8555, fingerprint=FP)
+    reborn = make_node(tmp_path, FakeLauncher(), peers, A_ID, peer=moved)
+    with TestClient(create_app(reborn)) as c:
+        body = c.post(f"/api/v1/transfers/{tid}/resume").json()
+        assert body["peer"]["id"] == "peer-b-after-restart" and body["peer"]["port"] == 8555
+        (_, host, port, _), = peers.called("offer_transfer")
+        assert (host, port) == ("10.0.0.7", 8555)
