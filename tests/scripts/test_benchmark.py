@@ -123,3 +123,12 @@ def test_detection_model() -> None:
     assert plot.detection_probability(9, 1.0) == pytest.approx(1 - 0.75**9)
     assert plot.detection_probability(600, 0.0) == 0.0
     assert plot.detection_probability(600, 1.0) > 0.999999
+
+
+def test_run_plan_covers_every_run_once_in_a_seeded_order() -> None:
+    plan = bench.run_plan(4, 3, seed=7)
+    assert sorted(plan) == [(i, r) for i in range(4) for r in range(3)]
+    assert plan == bench.run_plan(4, 3, seed=7)
+    assert plan != bench.run_plan(4, 3, seed=8)
+    # Shuffled, not grouped: the first point's repeats are not all at the front
+    assert plan[:3] != [(0, 0), (0, 1), (0, 2)]

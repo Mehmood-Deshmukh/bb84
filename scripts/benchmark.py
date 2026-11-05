@@ -16,6 +16,10 @@ Config keys:
   repeats       runs per grid point (default 30)
   grid          parameter -> list of values; every combination is run
   fixed         parameter -> single value, applied to every run (optional)
+  seed          seed for the run order (optional; --seed overrides; random if neither)
+
+All runs of an experiment are executed in one shuffled order (see run_plan), and
+each row records its position in that order in the `order` column.
 
 Parameters:
   mode           none | sign | hybrid (default none)
@@ -43,6 +47,8 @@ import math
 import os
 import platform
 import queue
+import random
+import secrets
 import socket
 import statistics
 import subprocess
@@ -383,6 +389,20 @@ def grid_points(cfg: dict) -> tuple[list[str], list[dict]]:
     return keys, points
 
 
+def run_plan(num_points: int, repeats: int, seed: int) -> list[tuple[int, int]]:
+    """
+    Every (grid point index, repeat) pair, in a seeded random order.
+
+    Running a point's repeats back to back would line up slow drift over a long
+    session (heat, background load) with the parameter being varied. Shuffling
+    spreads that drift evenly over all points; the seed makes the order
+    reproducible and is recorded in the metadata file.
+    """
+    plan = [(i, r) for i in range(num_points) for r in range(repeats)]
+    random.Random(seed).shuffle(plan)
+    return plan
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -392,6 +412,7 @@ def main() -> int:
     parser.add_argument("config", type=Path)
     parser.add_argument("--repeats", type=int, help="Override the config's repeats (for a quick check)")
     parser.add_argument("--name", help="Override the output name")
+    parser.add_argument("--seed", type=int, help="Seed for the run order (default: config 'seed', else random)")
     args = parser.parse_args()
 
     cfg = yaml.safe_load(args.config.read_text())
@@ -401,13 +422,17 @@ def main() -> int:
     RESULTS.mkdir(parents=True, exist_ok=True)
     meta = environment(cfg)
     meta["repeats"] = repeats
+    seed = args.seed if args.seed is not None else cfg.get("seed", secrets.randbits(32))
+    meta["run_order_seed"] = seed
     base_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
 
     rows: list[dict] = []
-    total = len(points) * repeats
+    plan = run_plan(len(points), repeats, seed)
     with tempfile.TemporaryDirectory(prefix="qkd-bench-") as tmp:
         work = Path(tmp)
         ids = _identities(work)
+        # Every payload is written before the first run, so file creation never
+        # falls between two timed runs
         payloads: dict[int, tuple[Path, str]] = {}
         for point in points:
             size = int(point["payload_bytes"])
@@ -415,14 +440,16 @@ def main() -> int:
                 path = work / f"payload_{size}.bin"
                 path.write_bytes(os.urandom(size))
                 payloads[size] = (path, _sha256(path))
-            payload, sha = payloads[size]
-            for repeat in range(repeats):
-                row = {**{k: point[k] for k in keys}, "repeat": repeat,
-                       **run_once(point, payload, sha, work, ids, base_env)}
-                rows.append(row)
-                label = ", ".join(f"{k}={point[k]}" for k in keys)
-                print(f"[{len(rows)}/{total}] {label} #{repeat + 1}: {row['stopped_at']} "
-                      f"protocol={row['protocol_s']}s", flush=True)
+
+        for order, (index, repeat) in enumerate(plan):
+            point = points[index]
+            payload, sha = payloads[int(point["payload_bytes"])]
+            row = {**{k: point[k] for k in keys}, "repeat": repeat, "order": order,
+                   **run_once(point, payload, sha, work, ids, base_env)}
+            rows.append(row)
+            label = ", ".join(f"{k}={point[k]}" for k in keys)
+            print(f"[{len(rows)}/{len(plan)}] {label} #{repeat + 1}: {row['stopped_at']} "
+                  f"protocol={row['protocol_s']}s", flush=True)
 
     meta["finished"] = datetime.now(timezone.utc).isoformat()
     write_csv(RESULTS / f"{name}.csv", rows)
