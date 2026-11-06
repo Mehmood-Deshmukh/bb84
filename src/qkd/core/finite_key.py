@@ -48,16 +48,19 @@ def deviation(n: int, k: int, eps_sec: float) -> float:
     return math.sqrt((n + k) / (n * k) * (k + 1) / k * math.log(2 / eps_sec))
 
 
-def secure_key_length(n: int, k: int, qber: float, eps_sec: float, eps_cor: float) -> int:
+def secure_key_length(n: int, k: int, qber: float, eps_sec: float, eps_cor: float,
+                      reconciliation_bits: int = 0) -> int:
     """
     Number of bits that can be extracted from the n kept bits, floored, never negative.
 
     n: kept sifted bits (sample removed); k: sample size; qber: observed error
-    rate on the sample.
+    rate on the sample; reconciliation_bits: parity bits disclosed by error correction
+    (Cascade), 0 when there is none. leak_EC is those bits plus the log2(2 / eps_cor)
+    bits of the correctness check (the key confirmation tag).
     """
     mu = deviation(n, k, eps_sec)
     if math.isinf(mu):
         return 0
-    leak_ec = math.log2(2 / eps_cor)
+    leak_ec = reconciliation_bits + math.log2(2 / eps_cor)
     length = n * (1 - binary_entropy(qber + mu)) - leak_ec - math.log2(2 / (eps_sec ** 2 * eps_cor))
     return max(0, math.floor(length))

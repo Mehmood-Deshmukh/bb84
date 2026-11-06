@@ -394,7 +394,8 @@ def main() -> int:
             say(f"[{n}/{len(plan)}] {mode} {step} {kind}: {row['outcome']}{flag}")
 
     bench.write_csv(run_dir / "summary.csv", summarize(bench.read_csv(run_dir / "runs.csv")))
-    meta.update(status="complete", finished=datetime.now(timezone.utc).isoformat())
+    meta.update(status="complete", finished=datetime.now(timezone.utc).isoformat(),
+                tree_changed_during_run=bench.tree_changed(meta))
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
     if bench.paper_grade(meta):
         bench.update_latest(run_dir.parent, run_dir)

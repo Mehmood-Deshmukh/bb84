@@ -34,6 +34,7 @@ from qkd.usecases.common import (
     report_summary,
 )
 from qkd.usecases.handshake import bob_finished, bob_hello, session_key
+from qkd.usecases.reconcile import bob_reconcile
 
 
 @dataclass(frozen=True)
@@ -121,11 +122,16 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
         reason = f"QBER {qber:.2%} >= threshold {params.qber_threshold:.0%}"
         return KeyExchangeResult(key=None, abort_reason=reason, **result)
 
-    # No reconciliation: the channel is noiseless, so the kept bits should match
-    # Alice's. If they do not, key confirmation (4b) or chunk 0 catches it.
+    # Without reconciliation the kept bits must already match Alice's; any difference
+    # is caught by key confirmation (4b) or the file tag. With "cascade" Bob corrects them.
     kept = discard_indices(sifted, sample_indices)
     # Count distinct positions, so a repeated index cannot inflate the sample size
-    secure, reason = finite_key_verdict(len(kept), len(set(sample_indices)), qber, params, reporter)
+    sample_size = len(set(sample_indices))
+    leaked = 0
+    if params.reconciliation == "cascade":
+        rec = bob_reconcile(channel, kept, qber, sample_size, reporter)
+        kept, leaked = rec.bits, rec.leaked_bits
+    secure, reason = finite_key_verdict(len(kept), sample_size, qber, params, reporter, leaked)
     if reason is not None:
         return KeyExchangeResult(key=None, secure_bits=secure, abort_reason=reason, **result)
 

@@ -24,7 +24,7 @@ from qkd.core.config import QBER_THRESHOLD
 from qkd.core.channel_model import decode_pulses, encode_pulses
 from qkd.core.quantum_channel import eve_intercept_resend
 from qkd.services.reporting import Reporter
-from qkd.services.wire import forward_message, recv_json, send_json
+from qkd.services.wire import forward_message, recv_json, relay_until_closed, send_json
 
 
 @dataclass(frozen=True)
@@ -105,16 +105,12 @@ def _report_knowledge(eve_bases: list[Optional[str]], bob_bases: list[str], matc
 
 
 def _forward_rest(alice: socket.socket, bob: socket.socket, signed: bool) -> None:
-    """Forward the salt, the finished exchange (signed modes), then file metadata and chunks until Alice disconnects."""
-    try:
-        forward_message(alice, bob)        # 4: salt
-        if signed:
-            forward_message(bob, alice)    # 4b: Bob's finished
-            forward_message(alice, bob)    # 4b: Alice's finished
-        while True:
-            forward_message(alice, bob)
-    except (ConnectionError, OSError):
-        pass
+    """
+    After the QBER verdict, relay everything both ways until both sides close: Cascade
+    rounds (if any), the salt, the finished exchange (signed modes), file metadata and
+    chunks. Eve no longer parses, so the number of messages does not matter.
+    """
+    relay_until_closed(alice, bob)
 
 
 def run_eavesdrop(

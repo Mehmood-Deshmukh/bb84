@@ -90,7 +90,8 @@ def report_qber_verdict(qber: float, threshold: float, sample_size: int, reporte
 
 
 def finite_key_verdict(
-    kept_bits: int, sample_size: int, qber: float, params: ProtocolParams, reporter: Reporter
+    kept_bits: int, sample_size: int, qber: float, params: ProtocolParams, reporter: Reporter,
+    reconciliation_bits: int = 0,
 ) -> tuple[int, Optional[str]]:
     """
     Compute the finite-key secure length and decide whether to abort.
@@ -99,7 +100,7 @@ def finite_key_verdict(
     the QBER Alice announced, and the bound security policy), so they reach the
     same verdict without sending it. Returns (secure_bits, abort_reason or None).
     """
-    secure = secure_key_length(kept_bits, sample_size, qber, params.eps_sec, params.eps_cor)
+    secure = secure_key_length(kept_bits, sample_size, qber, params.eps_sec, params.eps_cor, reconciliation_bits)
     reporter.metrics(secure_key_bits=secure)
     if secure >= params.final_key_bits:
         reporter.success(f"Finite-key bound: {secure} secure bits >= {params.final_key_bits} needed")

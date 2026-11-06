@@ -40,7 +40,7 @@ def test_security_policy_lists_the_values_peers_must_share() -> None:
     policy = ProtocolParams(final_key_bits=128, eps_sec=1e-6, eps_cor=1e-9, qber_threshold=0.05,
                             enforce_finite_key=False).security_policy()
     assert policy == {"final_key_bits": 128, "eps_sec": 1e-6, "eps_cor": 1e-9, "qber_threshold": 0.05,
-                      "enforce_finite_key": False}
+                      "enforce_finite_key": False, "reconciliation": "none"}
 
 
 def test_env_overrides() -> None:

@@ -86,6 +86,7 @@ STAGES = [
     "quantum_transmission",
     "sifting",
     "qber_estimation",
+    "reconciliation",
     "privacy_amplification",
     "key_confirmation",
     "file_transfer",
@@ -93,6 +94,7 @@ STAGES = [
 METRICS = [
     "raw_qubits", "detected", "sifted_length", "sample_size", "qber", "secure_key_bits", "key_bits",
     "handshake_ms", "auth_overhead_bytes", "qubit_bytes", "channel_bytes", "file_wire_bytes",
+    "reconciliation_rounds", "leaked_bits", "leaked_bits_conservative", "errors_corrected", "reconciliation_ms",
 ]
 SPECIAL = {"mode", "payload_bytes", "eve_fraction", "rtt_ms", "target_detected"}
 DEFAULTS = {"mode": "none", "payload_bytes": 1000, "eve_fraction": 0.0, "rtt_ms": None, "target_detected": None}
@@ -482,9 +484,19 @@ def run_id(started: datetime, commit: Optional[str], dirty: bool, scratch: bool)
 
 
 def paper_grade(meta: dict) -> bool:
-    """Complete, clean tree, and the config's own number of repeats."""
+    """Complete, clean tree throughout, and the config's own number of repeats."""
     return (meta.get("status") == "complete" and not meta.get("git_dirty")
+            and not meta.get("tree_changed_during_run")
             and meta.get("repeats") == meta.get("config", {}).get("repeats", 30))
+
+
+def tree_changed(meta: dict) -> bool:
+    """
+    Did the code change while the run was going? The runners import the working tree
+    (editable install), so an edit during a run silently mixes code versions.
+    """
+    now = environment(meta.get("config", {}))
+    return (now["git_commit"], now["git_dirty"]) != (meta.get("git_commit"), meta.get("git_dirty"))
 
 
 def done_keys(rows: list[dict], keys: list[str]) -> set[tuple[str, ...]]:
@@ -611,8 +623,12 @@ def main() -> int:
 
     # The summary is always computed from runs.csv on disk, so resumed runs are included
     write_csv(run_dir / "summary.csv", summarize(read_csv(run_dir / "runs.csv"), keys))
-    meta.update(status="complete", finished=datetime.now(timezone.utc).isoformat())
+    meta.update(status="complete", finished=datetime.now(timezone.utc).isoformat(),
+                tree_changed_during_run=tree_changed(meta))
     meta_path.write_text(json.dumps(meta, indent=2, default=str))
+    if meta["tree_changed_during_run"]:
+        say("WARNING: the code changed during this run (commit or uncommitted edits); "
+            "it is not paper grade. Rerun on a clean, unchanged tree.")
     if paper_grade(meta):
         update_latest(run_dir.parent, run_dir)
         say(f"complete; {run_dir.parent.name}/latest -> {run_dir.name}")

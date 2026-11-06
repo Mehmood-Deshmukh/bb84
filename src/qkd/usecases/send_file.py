@@ -6,7 +6,10 @@ Message order on the socket (must match receive_file.py and eavesdrop_demo.py):
   1  -> {"n","index","qubits"}: the pulses that clicked at Bob (untracked; channel_model.encode_pulses)
   2  <- Bob's bases            -> matching indices
   3  -> {"sample_indices"}     <- {"sample_bits"}       -> {"qber"}   (both abort if qber >= threshold)
-     both abort if the finite-key secure length is below final_key_bits (no message)
+  3c (reconciliation "cascade" only) -> {"cascade_seed"}, then <- {"cascade"} / -> {"parities"} rounds
+     until Bob sends an empty {"cascade": []} (usecases/reconcile.py)
+     both abort if the finite-key secure length (charged for the revealed parities) is below
+     final_key_bits (no message)
   4  -> {"salt"} (Toeplitz seed) T = transcript digest
   4b <- {"finished","confirm"} -> {"finished","confirm"} (untracked; sign and hybrid only)
   5  -> encrypted file metadata, then one message per chunk (metadata bound as GCM AAD)
@@ -42,6 +45,7 @@ from qkd.usecases.common import (
     report_summary,
 )
 from qkd.usecases.handshake import alice_finished, alice_hello, session_key
+from qkd.usecases.reconcile import alice_reconcile
 
 
 def _transmit_qubits(
@@ -135,7 +139,10 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
         return KeyExchangeResult(key=None, abort_reason=reason, **result)
 
     kept = discard_indices(sifted, sample_indices)
-    secure, reason = finite_key_verdict(len(kept), len(sample_indices), qber, params, reporter)
+    leaked = 0
+    if params.reconciliation == "cascade":
+        leaked = alice_reconcile(channel, kept, reporter).leaked_bits
+    secure, reason = finite_key_verdict(len(kept), len(sample_indices), qber, params, reporter, leaked)
     if reason is not None:
         return KeyExchangeResult(key=None, secure_bits=secure, abort_reason=reason, **result)
 

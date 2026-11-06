@@ -123,6 +123,18 @@ def _channel() -> ChannelParams:
 
 CHANNEL = _channel()
 
+
+def _validate_reconciliation(raw: str) -> str:
+    val = raw.strip().lower()
+    if val not in {"none", "cascade"}:
+        raise ValueError(f"Invalid reconciliation: {raw!r}. Allowed: none, cascade")
+    return val
+
+
+# Error correction between QBER estimation and privacy amplification (core/cascade.py).
+# "none" keeps the original protocol, where any error aborts at key confirmation.
+RECONCILIATION = _env("RECONCILIATION", "none", _validate_reconciliation)
+
 AUTH_MODE = _env("AUTH_MODE", "hybrid", _validate_auth_mode)
 IDENTITY_DIR = _env("IDENTITY_DIR", "identity", str)
 KNOWN_PEERS_FILE = _env("KNOWN_PEERS_FILE", "known_peers.json", str)
@@ -144,6 +156,7 @@ class ProtocolParams:
     # Physics, not policy: not negotiated in the hello. Alice's side applies loss and
     # background clicks, Bob's side the misalignment error (see channel_model.py).
     channel: ChannelParams = CHANNEL
+    reconciliation: str = RECONCILIATION
 
     def security_policy(self) -> dict:
         """
@@ -156,4 +169,5 @@ class ProtocolParams:
             "eps_cor": self.eps_cor,
             "qber_threshold": self.qber_threshold,
             "enforce_finite_key": self.enforce_finite_key,
+            "reconciliation": self.reconciliation,
         }

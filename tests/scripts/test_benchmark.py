@@ -192,3 +192,9 @@ def test_point_channel_follows_the_channel_settings() -> None:
     over = bench.point_channel({"QKD_MISALIGNMENT": 0.02}, {"QKD_CHANNEL_PRESET": "KTH"})
     assert over.detector_efficiency == 0.143 and over.misalignment == 0.02
     assert bench.point_channel({}, {}).is_ideal
+
+
+def test_a_run_whose_tree_changed_is_not_paper_grade() -> None:
+    meta = {"status": "complete", "git_dirty": False, "repeats": 30, "config": {"repeats": 30}}
+    assert bench.paper_grade(meta)
+    assert not bench.paper_grade({**meta, "tree_changed_during_run": True})

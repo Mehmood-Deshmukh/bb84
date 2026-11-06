@@ -55,6 +55,7 @@ STAGE_STATUS = {
     "quantum_transmission": S.key_exchange,
     "sifting": S.key_exchange,
     "qber_estimation": S.key_exchange,
+    "reconciliation": S.key_exchange,
     "privacy_amplification": S.key_exchange,
     "key_confirmation": S.key_exchange,
     "file_transfer": S.transferring,
