@@ -207,6 +207,11 @@ def render_lines(fig: dict, rows: list[dict], centre: str, lo: str, hi: str) -> 
         ax.fill_between(xs, [r[lo] for r in pts], [r[hi] for r in pts], color=color, alpha=0.15, linewidth=0)
         ax.plot(xs, [r[centre] for r in pts], color=color, linewidth=1.5, marker="o", markersize=4.5,
                 markeredgecolor="white", markeredgewidth=0.8, label=label)
+        if fig.get("analytic_column"):
+            # A model value stored per point in the summary (e.g. model_qber), drawn dashed
+            col = fig["analytic_column"] + "_median"
+            ax.plot(xs, [r[col] * fig.get("scale", 1.0) for r in pts], color=color, linewidth=1.0,
+                    linestyle="--", zorder=3)
         if fig.get("analytic"):
             fn = ANALYTIC[fig["analytic"]]
             # One series: the model is a separate reference, drawn in ink on top so it stays visible
@@ -222,7 +227,7 @@ def render_lines(fig: dict, rows: list[dict], centre: str, lo: str, hi: str) -> 
                         xytext=(0, 3), textcoords="offset points", fontsize=7.5, color=INK_SECONDARY)
     axes_setup(ax, fig)
     handles, labels = ax.get_legend_handles_labels()
-    if fig.get("analytic"):
+    if fig.get("analytic") or fig.get("analytic_column"):
         handles.append(plt.Line2D([], [], color=INK_SECONDARY, linestyle="--", linewidth=1.0))
         labels.append(fig.get("analytic_label", "Analytic"))
     if len(handles) >= 2:

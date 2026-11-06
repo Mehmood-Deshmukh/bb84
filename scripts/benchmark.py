@@ -26,6 +26,9 @@ Parameters:
   mode           none | sign | hybrid (default none)
   payload_bytes  size of the random file Alice sends (default 1000)
   eve_fraction   share of qubits Eve intercepts; 0 means no Eve (default 0)
+  target_detected  aim for this many pulses detected at Bob: sets QKD_NUM_QUBITS to
+                 ceil(target / click probability) for the point's channel (QKD_CHANNEL_*
+                 settings), so every distance gets a similar number of detections
   rtt_ms         round-trip time added between Alice and the next hop by
                  scripts/latency_proxy.py (rtt_ms / 2 each way); unset means no proxy,
                  0 means the proxy with no delay (the baseline for its own overhead)
@@ -91,8 +94,8 @@ METRICS = [
     "raw_qubits", "detected", "sifted_length", "sample_size", "qber", "secure_key_bits", "key_bits",
     "handshake_ms", "auth_overhead_bytes", "qubit_bytes", "channel_bytes", "file_wire_bytes",
 ]
-SPECIAL = {"mode", "payload_bytes", "eve_fraction", "rtt_ms"}
-DEFAULTS = {"mode": "none", "payload_bytes": 1000, "eve_fraction": 0.0, "rtt_ms": None}
+SPECIAL = {"mode", "payload_bytes", "eve_fraction", "rtt_ms", "target_detected"}
+DEFAULTS = {"mode": "none", "payload_bytes": 1000, "eve_fraction": 0.0, "rtt_ms": None, "target_detected": None}
 LATENCY_PROXY = ROOT / "scripts" / "latency_proxy.py"
 PROCESS_TIMEOUT = 600.0
 
@@ -222,10 +225,38 @@ class LineReader:
         self._thread.join(timeout=10)
 
 
+def point_channel(point: dict, base_env: dict):
+    """
+    The ChannelParams a run at this point will use, built the way core/config.py builds
+    it from the QKD_CHANNEL_* settings (the point's values override the environment's).
+    """
+    from dataclasses import replace
+
+    from qkd.core.channel_model import preset
+
+    env = {**base_env, **{k: str(v) for k, v in point.items() if k not in SPECIAL}}
+
+    def num(name: str):
+        raw = env.get(f"QKD_{name}", "")
+        return float(raw) if raw != "" else None
+
+    base = preset(env.get("QKD_CHANNEL_PRESET") or "ideal", num("CHANNEL_LENGTH_KM") or 0.0)
+    overrides = {field: value for field, value in (
+        ("loss_db_per_km", num("FIBER_LOSS_DB_PER_KM")),
+        ("detector_efficiency", num("DETECTOR_EFFICIENCY")),
+        ("dark_count_prob", num("DARK_COUNT_PROB")),
+        ("misalignment", num("MISALIGNMENT")),
+    ) if value is not None}
+    return replace(base, **overrides)
+
+
 def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict, base_env: dict) -> dict:
     """One Alice/Bob (and maybe Eve) run for a grid point. Returns a flat result row."""
     mode, fraction = point["mode"], float(point["eve_fraction"])
     env = {**base_env, **{k: str(v) for k, v in point.items() if k not in SPECIAL}}
+    channel = point_channel(point, base_env)
+    if point.get("target_detected") is not None:
+        env["QKD_NUM_QUBITS"] = str(math.ceil(float(point["target_detected"]) / channel.click_prob))
     out_dir = work / "received"
     auth_alice, auth_bob = [], []
     if mode != "none":
@@ -287,6 +318,10 @@ def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict
         received.unlink()
 
     row: dict[str, Any] = {
+        "num_pulses": int(env.get("QKD_NUM_QUBITS", 0)) or None,
+        # What the channel model predicts for this point, to compare with the measurements
+        "model_click_prob": channel.click_prob,
+        "model_qber": round(channel.error_rate, 6),
         "stopped_at": classify(a, b, intact),
         "intact": int(intact),
         "alice_outcome": a["outcome"], "bob_outcome": b["outcome"],
@@ -305,6 +340,7 @@ def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict
         row["bb84_classical_bytes"] = row["channel_bytes"] - row["qubit_bytes"] - row["auth_overhead_bytes"]
     else:
         row["bb84_classical_bytes"] = None
+    row["click_rate"] = (row["detected"] / row["raw_qubits"]) if row.get("detected") and row.get("raw_qubits") else None
     row["sim_s"] = _round(((a["metrics"].get("sim_ms") or 0) + (b["metrics"].get("sim_ms") or 0)) / 1000)
     # Protocol time with the simulator's share removed. The simulation steps run one
     # after another (Alice prepares, then Bob measures), so subtracting both is valid.
@@ -330,7 +366,7 @@ def _sha256(path: Path) -> str:
 
 # ── summary and metadata ────────────────────────────────────────────────────
 
-NUMERIC_SUMMARY = ["wall_s", "protocol_s", "end_to_end_s", "end_to_end_minus_sim_s", "sim_s", "protocol_minus_sim_s", "bb84_classical_bytes", *METRICS,
+NUMERIC_SUMMARY = ["num_pulses", "click_rate", "model_click_prob", "model_qber", "wall_s", "protocol_s", "end_to_end_s", "end_to_end_minus_sim_s", "sim_s", "protocol_minus_sim_s", "bb84_classical_bytes", *METRICS,
                    *[f"{side}_{stage}_s" for side in ("alice", "bob") for stage in STAGES]]
 OUTCOMES = ["delivered", "qber_check", "finite_key", "key_confirmation", "authentication", "chunk_tag", "other"]
 

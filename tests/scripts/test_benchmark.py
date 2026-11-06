@@ -183,3 +183,12 @@ def test_update_latest_points_at_the_run_dir(tmp_path) -> None:
     latest = tmp_path / "latest"
     assert latest.is_symlink() and latest.resolve() == second.resolve()
     assert not (tmp_path / ".latest.tmp").exists()
+
+
+def test_point_channel_follows_the_channel_settings() -> None:
+    gys = bench.point_channel({"QKD_CHANNEL_PRESET": "GYS", "QKD_CHANNEL_LENGTH_KM": 50}, {})
+    assert gys.length_km == 50 and gys.loss_db_per_km == 0.21
+    # The environment applies unless the point overrides it
+    over = bench.point_channel({"QKD_MISALIGNMENT": 0.02}, {"QKD_CHANNEL_PRESET": "KTH"})
+    assert over.detector_efficiency == 0.143 and over.misalignment == 0.02
+    assert bench.point_channel({}, {}).is_ideal

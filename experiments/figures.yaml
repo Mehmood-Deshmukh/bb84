@@ -125,3 +125,51 @@ figures:
     title: Protocol time vs network round-trip time
     direct_labels: false  # sign and hybrid lines overlap, end labels would collide
     legend_loc: upper left
+
+  - id: n0_click_rate
+    kind: measure
+    source: n0_channel
+    x: QKD_CHANNEL_LENGTH_KM
+    y: click_rate
+    series: QKD_CHANNEL_PRESET
+    series_order: [GYS, KTH]
+    analytic_column: model_click_prob
+    analytic_label: Channel model
+    yscale: log
+    xlabel: Fibre length (km)
+    ylabel: Detected / sent pulses
+    title: Click rate vs distance, measured and modelled
+    legend_loc: upper right
+
+  - id: n0_qber
+    kind: measure
+    source: n0_channel
+    x: QKD_CHANNEL_LENGTH_KM
+    y: qber
+    series: QKD_CHANNEL_PRESET
+    series_order: [GYS, KTH]
+    analytic_column: model_qber
+    analytic_label: Channel model
+    hline: 0.11
+    hline_label: "11% abort threshold"
+    xlabel: Fibre length (km)
+    ylabel: QBER (sampled)
+    title: QBER vs distance, measured and modelled
+    legend_loc: upper left
+
+  - id: e1n_detection
+    kind: rate
+    source: e1n_detection
+    x: target_detected
+    y: rate_qber_check
+    series: eve_fraction
+    ordinal: true
+    series_label: "f = {:g}"
+    legend_title: Eve intercepts
+    xscale: log2
+    ylim: [-0.03, 1.05]
+    direct_labels: false
+    legend_loc: outside
+    xlabel: Pulses detected at Bob
+    ylabel: Runs stopped by the QBER check
+    title: Detection on a GYS 25 km link (95% Wilson band)

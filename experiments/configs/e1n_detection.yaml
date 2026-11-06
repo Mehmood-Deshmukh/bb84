@@ -1,0 +1,17 @@
+# E1-noisy: eavesdropper detection over a realistic link (GYS at 25 km, background
+# QBER about 3.3% from misalignment). Eve's errors now have to stand out against that
+# floor: expected QBER is about 3.3% + 0.23 f. f = 0 measures false alarms (noise alone
+# tripping the 11% check). Sample size grows with target_detected (sample is about
+# 7.5% of detected pulses). Compare with E1 on the ideal channel.
+name: e1n_detection
+description: QBER-check detection of a partial Eve on a GYS 25 km link, incl. false alarms
+repeats: 30
+fixed:
+  mode: none
+  payload_bytes: 1000
+  QKD_CHANNEL_PRESET: GYS
+  QKD_CHANNEL_LENGTH_KM: 25
+  QKD_ENFORCE_FINITE_KEY: 0
+grid:
+  target_detected: [1000, 4000, 16000]
+  eve_fraction: [0.0, 0.25, 0.5, 1.0]
