@@ -9,6 +9,9 @@ paper-grade run id written by scripts/benchmark.py) and writes
 experiments/figures/<id>.png and <id>.pdf. experiments/figures/sources.json records
 which run id every figure was drawn from.
 
+A figure may add `where: {column: value}` to filter summary rows, and a list `series: [a, b]`
+to draw one series per combination.
+
 Figure kinds:
   rate     an outcome rate per x, one line per series, Wilson 95% band; optional
            analytic overlay (dashed, same color)
@@ -108,6 +111,20 @@ def load(source: str) -> list[dict[str, Any]]:
                 row[k] = float(v)
             except (TypeError, ValueError):
                 pass
+    return rows
+
+
+def prepare_rows(fig: dict, rows: list[dict]) -> list[dict]:
+    """
+    Apply a figure's optional `where` filter (column: value) and fold a list-valued `series`
+    into one label per row ("a / b") so it can be drawn as ordinary series.
+    """
+    for column, wanted in (fig.get("where") or {}).items():
+        rows = [r for r in rows if r[column] == wanted]
+    if isinstance(fig.get("series"), list):
+        for r in rows:
+            r["__series"] = " / ".join(str(r[c]) for c in fig["series"])
+        fig["series"] = "__series"
     return rows
 
 
@@ -345,7 +362,7 @@ def main() -> int:
             print(f"skip {fig['id']}: {source.relative_to(ROOT)} not found "
                   "(no paper-grade run yet; run scripts/benchmark.py with the config's repeats)")
             continue
-        figure = RENDERERS[fig["kind"]](fig, load(fig["source"]))
+        figure = RENDERERS[fig["kind"]](fig, prepare_rows(fig, load(fig["source"])))
         for ext in ("png", "pdf"):
             figure.savefig(out_dir / f"{fig['id']}.{ext}", dpi=200, bbox_inches="tight")
         plt.close(figure)

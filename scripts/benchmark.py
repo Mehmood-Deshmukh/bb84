@@ -32,6 +32,12 @@ Parameters:
   rtt_ms         round-trip time added between Alice and the next hop by
                  scripts/latency_proxy.py (rtt_ms / 2 each way); unset means no proxy,
                  0 means the proxy with no delay (the baseline for its own overhead)
+  strategy       resume | restart: interrupt the transfer and reconnect (experiment E8). Session 1
+                 runs Bob and Alice with --resume; once kill_fraction of the chunks are sent Alice is
+                 SIGKILLed and Bob must report `interrupted`. Session 2 is the one measured: resume
+                 relaunches both with the same transfer id, restart relaunches both without --resume
+                 in a clean output dir. Needs sign or hybrid, no Eve, no proxy. See run_interrupted.
+  kill_fraction  share of the chunks Alice has sent when she is killed (default 0.5)
   QKD_*          anything else is passed to all processes as an environment variable
 
 Outputs: one folder per invocation (a "run id"), never overwritten:
@@ -96,8 +102,15 @@ METRICS = [
     "handshake_ms", "auth_overhead_bytes", "qubit_bytes", "channel_bytes", "file_wire_bytes",
     "reconciliation_rounds", "leaked_bits", "leaked_bits_conservative", "errors_corrected", "reconciliation_ms",
 ]
-SPECIAL = {"mode", "payload_bytes", "eve_fraction", "rtt_ms", "target_detected"}
-DEFAULTS = {"mode": "none", "payload_bytes": 1000, "eve_fraction": 0.0, "rtt_ms": None, "target_detected": None}
+SPECIAL = {"mode", "payload_bytes", "eve_fraction", "rtt_ms", "target_detected", "strategy", "kill_fraction"}
+DEFAULTS = {"mode": "none", "payload_bytes": 1000, "eve_fraction": 0.0, "rtt_ms": None, "target_detected": None,
+            "strategy": None, "kill_fraction": 0.5}
+STRATEGIES = ("resume", "restart")
+# Columns of an interrupted run (run_interrupted); every such row has all of them, None when unknown
+RECONNECT_COLUMNS = [
+    "reconnect_s", "reconnect_minus_sim_s", "completion_s", "resumed_from_bytes", "bytes_total", "resent_bytes",
+    "lost_bytes", "reconnect_bytes", "sent_before_kill_bytes", "kept_bytes", "s1_bob_outcome",
+]
 LATENCY_PROXY = ROOT / "scripts" / "latency_proxy.py"
 PROCESS_TIMEOUT = 600.0
 
@@ -254,6 +267,8 @@ def point_channel(point: dict, base_env: dict):
 
 def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict, base_env: dict) -> dict:
     """One Alice/Bob (and maybe Eve) run for a grid point. Returns a flat result row."""
+    if point.get("strategy"):
+        return run_interrupted(point, payload, payload_sha, work, ids, base_env)
     mode, fraction = point["mode"], float(point["eve_fraction"])
     env = {**base_env, **{k: str(v) for k, v in point.items() if k not in SPECIAL}}
     channel = point_channel(point, base_env)
@@ -318,7 +333,11 @@ def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict
     intact = received.exists() and _sha256(received) == payload_sha
     if received.exists():
         received.unlink()
+    return build_row(env, channel, a, b, wall_s, intact)
 
+
+def build_row(env: dict, channel, a: dict, b: dict, wall_s: float, intact: bool) -> dict:
+    """The flat result row from Alice's and Bob's summarized events (shared by run_once and run_interrupted)."""
     row: dict[str, Any] = {
         "num_pulses": int(env.get("QKD_NUM_QUBITS", 0)) or None,
         # What the channel model predicts for this point, to compare with the measurements
@@ -354,6 +373,178 @@ def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict
     return row
 
 
+# ── interrupted runs (experiment E8) ────────────────────────────────────────
+
+def kill_chunk(num_chunks: int, fraction: float) -> int:
+    """Alice is killed once this many chunks are sent: ceil(fraction * num_chunks), at least 1, at most all."""
+    return min(max(1, math.ceil(num_chunks * fraction)), num_chunks)
+
+
+def stage_ts(events: list[dict], stage: str) -> Optional[float]:
+    """Timestamp of the first event that starts `stage`."""
+    return next((e["ts"] for e in events if e["type"] == "stage" and _stage_name(e) == stage), None)
+
+
+def last_progress_bytes(events: list[dict]) -> Optional[int]:
+    """bytes_done of the last progress event (None if there was none)."""
+    done = [e["payload"]["bytes_done"] for e in events if e["type"] == "progress"]
+    return done[-1] if done else None
+
+
+def kept_bytes(sidecar: Path) -> Optional[int]:
+    """Bytes Bob's sidecar says he holds (verified chunks), or None if there is no readable sidecar."""
+    try:
+        side = json.loads(sidecar.read_text())
+        return min(int(side["next_chunk"]) * int(side["chunk_size"]), int(side["total_size"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def reconnect_columns(alice_events: list[dict], a: dict, sim_s: Optional[float], *, payload_size: int,
+                      sent_before_kill: Optional[int], kept: Optional[int], s1_bob_outcome: str) -> dict[str, Any]:
+    """
+    The E8 columns for the second (reconnecting) session. See experiments/configs/e8_reconnect.yaml.
+
+    reconnect_s    Alice's authentication stage to her file_transfer stage (the first chunk follows at once);
+                   the resume negotiation runs inside key_confirmation, so it is part of this
+    completion_s   Alice's authentication stage to her result (Bob's receipt for resume)
+    resent_bytes   file_wire_bytes of the session: metadata and chunks on the wire, length prefixes included
+    reconnect_bytes  channel_bytes: everything through the transcript channel before the first chunk,
+                   including 4c/4d when resuming
+    lost_bytes     what Alice had sent when she was killed (her last progress event) minus what Bob kept
+    """
+    metrics = a["metrics"]
+    first_chunk = stage_ts(alice_events, "file_transfer")
+    reconnect = (first_chunk - a["start_ts"]) if first_chunk is not None and a["start_ts"] is not None else None
+    lost = max(0, sent_before_kill - kept) if sent_before_kill is not None and kept is not None else None
+    return {
+        "reconnect_s": _round(reconnect),
+        "reconnect_minus_sim_s": _round(reconnect - sim_s) if reconnect is not None and sim_s is not None else None,
+        "completion_s": _round(a["protocol_s"]),
+        "resumed_from_bytes": metrics.get("resumed_from_bytes", 0),
+        "bytes_total": metrics.get("bytes_total", payload_size),
+        "resent_bytes": metrics.get("file_wire_bytes"),
+        "lost_bytes": lost,
+        "reconnect_bytes": metrics.get("channel_bytes"),
+        "sent_before_kill_bytes": sent_before_kill,
+        "kept_bytes": kept,
+        "s1_bob_outcome": s1_bob_outcome,
+    }
+
+
+def _start_pair(payload: Path, out_dir: Path, tid: str, resume: bool, mode: str, ids: dict, env: dict):
+    """Bob (port 0) and Alice for one session, both emitting JSON events. Returns (alice, alice_reader, bob, bob_reader)."""
+    flags = ["--transfer-id", tid, *(["--resume"] if resume else [])]
+    auth_alice = ["--auth", mode, "--identity", str(ids["alice_dir"]), "--peer-fingerprint", ids["bob_fp"]]
+    auth_bob = ["--auth", mode, "--identity", str(ids["bob_dir"]), "--peer-fingerprint", ids["alice_fp"]]
+    bob = subprocess.Popen(
+        runner("bob", "--port", "0", "--events", "json", "--output-dir", str(out_dir), *flags, *auth_bob),
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    bob_reader = LineReader(bob)
+    port = bob_reader.port.get(timeout=120)
+    alice = subprocess.Popen(
+        runner("alice", str(payload), "--host", "127.0.0.1", "--port", str(port), "--events", "json", *flags, *auth_alice),
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    return alice, LineReader(alice), bob, bob_reader
+
+
+def _wait_for_kill_point(alice: subprocess.Popen, reader: LineReader, fraction: float) -> bool:
+    """Block until Alice's progress events show kill_chunk(...) chunks sent. False if she exited first."""
+    seen = 0
+    deadline = time.monotonic() + PROCESS_TIMEOUT
+    while time.monotonic() < deadline:
+        lines = reader.lines[seen:]
+        seen += len(lines)
+        for event in parse_events(lines):
+            if event["type"] == "progress":
+                p = event["payload"]
+                if p["chunks_done"] >= kill_chunk(p["num_chunks"], fraction):
+                    return True
+        if alice.poll() is not None and seen >= len(reader.lines):
+            return False
+        time.sleep(0.002)
+    raise TimeoutError("Alice never reached the kill point")
+
+
+def run_interrupted(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict, base_env: dict) -> dict:
+    """
+    Experiment E8: interrupt a transfer, reconnect, and measure the second session.
+
+    Session 1 (both strategies): Bob and Alice with --resume and a run-unique transfer id; Alice is
+    SIGKILLed once kill_fraction of the chunks are sent and Bob must report outcome `interrupted`.
+    Session 2: `resume` relaunches both with the same id and output dir (only the missing chunks are
+    sent); `restart` relaunches both without --resume, a fresh id and a clean output dir (the whole
+    file is sent again). The row describes session 2; see reconnect_columns for the extra columns.
+    """
+    import shutil
+
+    mode, strategy = point["mode"], point["strategy"]
+    if strategy not in STRATEGIES:
+        raise ValueError(f"strategy must be one of {STRATEGIES}, got {strategy!r}")
+    if mode == "none":
+        raise ValueError("resume needs sign or hybrid; strategy runs have no none mode")
+    if float(point["eve_fraction"]) > 0 or point.get("rtt_ms") is not None:
+        raise ValueError("strategy runs use a direct link: no Eve and no latency proxy")
+    env = {**base_env, **{k: str(v) for k, v in point.items() if k not in SPECIAL}}
+    channel = point_channel(point, base_env)
+    tid = f"e8-{secrets.token_hex(6)}"
+    run_dir = work / tid
+    out1 = run_dir / "received1"
+    pairs: list = []
+    try:
+        # ── session 1: run until the kill point, then SIGKILL Alice ──
+        alice, a_reader, bob, b_reader = _start_pair(payload, out1, tid, True, mode, ids, env)
+        pairs.append((alice, bob))
+        reached = _wait_for_kill_point(alice, a_reader, float(point["kill_fraction"]))
+        if reached:
+            alice.kill()
+        alice.wait(timeout=PROCESS_TIMEOUT)
+        bob.wait(timeout=PROCESS_TIMEOUT)
+        a_reader.join()
+        b_reader.join()
+        a1 = summarize_events(parse_events(a_reader.lines))
+        b1 = summarize_events(parse_events(b_reader.lines))
+        sent = last_progress_bytes(parse_events(a_reader.lines))
+        kept = kept_bytes(out1 / ".resume" / f"{tid}.json")
+
+        # ── session 2: the one measured ──
+        if strategy == "resume":
+            out2, tid2 = out1, tid
+        else:
+            tid2 = f"{tid}-restart"
+            out2 = run_dir / "received2"
+        wall_start = time.perf_counter()
+        alice, a_reader, bob, b_reader = _start_pair(payload, out2, tid2, strategy == "resume", mode, ids, env)
+        pairs.append((alice, bob))
+        alice.wait(timeout=PROCESS_TIMEOUT)
+        wall_s = time.perf_counter() - wall_start
+        bob.wait(timeout=PROCESS_TIMEOUT)
+        a_reader.join()
+        b_reader.join()
+        alice_events = parse_events(a_reader.lines)
+        a = summarize_events(alice_events)
+        b = summarize_events(parse_events(b_reader.lines))
+        received = out2 / f"received_{payload.name}"
+        intact = received.exists() and _sha256(received) == payload_sha
+    finally:
+        for alice, bob in pairs:
+            for proc in (alice, bob):
+                if proc.poll() is None:
+                    proc.kill()
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    row = build_row(env, channel, a, b, wall_s, intact)
+    if b1["outcome"] != "interrupted":
+        # The kill did not interrupt the transfer (it finished first, or failed): report, never drop
+        row["stopped_at"] = "other"
+        row["bob_error"] = f"session 1 ended {b1['outcome']!r} instead of 'interrupted': {b1['error']}"
+    row.update(reconnect_columns(alice_events, a, row["sim_s"], payload_size=payload.stat().st_size,
+                                 sent_before_kill=sent, kept=kept, s1_bob_outcome=b1["outcome"]))
+    return row
+
+
 def _round(value: Optional[float], digits: int = 5) -> Optional[float]:
     return None if value is None else round(value, digits)
 
@@ -369,7 +560,8 @@ def _sha256(path: Path) -> str:
 # ── summary and metadata ────────────────────────────────────────────────────
 
 NUMERIC_SUMMARY = ["num_pulses", "click_rate", "model_click_prob", "model_qber", "wall_s", "protocol_s", "end_to_end_s", "end_to_end_minus_sim_s", "sim_s", "protocol_minus_sim_s", "bb84_classical_bytes", *METRICS,
-                   *[f"{side}_{stage}_s" for side in ("alice", "bob") for stage in STAGES]]
+                   *[f"{side}_{stage}_s" for side in ("alice", "bob") for stage in STAGES],
+                   *[c for c in RECONNECT_COLUMNS if c != "s1_bob_outcome"]]
 OUTCOMES = ["delivered", "qber_check", "finite_key", "key_confirmation", "authentication", "chunk_tag", "other"]
 
 
