@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from cryptography.exceptions import InvalidTag
 
+from qkd.core.channel_model import encode_pulses
 from qkd.core.quantum_channel import measure_qubits, prepare_qubits
 from qkd.services import wire
 from qkd.services.file_stream import MetadataError
@@ -77,18 +78,18 @@ def test_semantic_change_keeps_hex_hex_and_base64_decodable() -> None:
 def test_semantic_qubit_change_flips_exactly_one_encoded_bit() -> None:
     # Includes bit 0 in the + basis, whose QASM has no gates and no trailing newline
     bits, bases = [0, 1, 0, 1, 1, 0], ["+", "+", "x", "x", "+", "x"]
-    raw = wire.encode_json(prepare_qubits(bits, bases))
+    raw = wire.encode_json(encode_pulses(len(bits), None, prepare_qubits(bits, bases)))
     for seed in range(30):
         out, applied = fz.mutate(raw, "1", "semantic", random.Random(seed))
         assert applied == "semantic"
-        measured = measure_qubits(json.loads(out), bases)
+        measured = measure_qubits(json.loads(out)["qubits"], bases)
         assert sum(m != b for m, b in zip(measured, bits)) == 1
 
 
 def test_unchangeable_semantic_falls_back_and_says_so() -> None:
     # A "qubit" without a register line cannot be flipped, so the semantic change is a
     # no-op; the fallback must still change the bytes and must be labelled as such
-    raw = wire.encode_json(["not a circuit"])
+    raw = wire.encode_json(encode_pulses(1, None, ["not a circuit"]))
     out, applied = fz.mutate(raw, "1", "semantic", random.Random(0))
     assert out != raw
     assert applied == "bitflip_fallback"

@@ -3,7 +3,7 @@ Alice's workflow: BB84 key exchange, then chunked AES-256-GCM file streaming.
 
 Message order on the socket (must match receive_file.py and eavesdrop_demo.py):
   0a -> {"hello"}              0b <- {"hello"}          (both abort on mode mismatch)
-  1  -> qubits (QASM list, untracked)
+  1  -> {"n","index","qubits"}: the pulses that clicked at Bob (untracked; channel_model.encode_pulses)
   2  <- Bob's bases            -> matching indices
   3  -> {"sample_indices"}     <- {"sample_bits"}       -> {"qber"}   (both abort if qber >= threshold)
      both abort if the finite-key secure length is below final_key_bits (no message)
@@ -17,6 +17,8 @@ from __future__ import annotations
 import socket
 import time
 
+import numpy as np
+
 from qkd.core.bb84_protocol import (
     choose_sample_indices,
     compute_qber,
@@ -26,6 +28,7 @@ from qkd.core.bb84_protocol import (
     matching_basis_indices,
     privacy_amplification,
 )
+from qkd.core.channel_model import ChannelParams, encode_pulses, sample_clicks
 from qkd.core.config import ProtocolParams
 from qkd.core.quantum_channel import prepare_qubits
 from qkd.services.file_stream import describe_file, send_encrypted_file
@@ -41,27 +44,44 @@ from qkd.usecases.common import (
 from qkd.usecases.handshake import alice_finished, alice_hello, session_key
 
 
-def _transmit_qubits(channel: TranscriptChannel, n: int, reporter: Reporter) -> tuple[list[int], list[str]]:
+def _transmit_qubits(
+    channel: TranscriptChannel, n: int, link: ChannelParams, reporter: Reporter
+) -> tuple[list[int], list[str]]:
+    """
+    Send n pulses through the simulated channel; return Alice's bits and bases for the
+    pulses that clicked at Bob, in the order they appear in the qubit message.
+
+    The fibre and Bob's detector efficiency and background are emulated here, on the
+    sending side: only clicked pulses are simulated (channel_model.sample_clicks, exact in
+    distribution). A click from background alone is sent as null, since its photon never
+    arrived. Alice's protocol logic still learns which pulses clicked only from Bob's
+    bases in step 2. On the ideal channel every pulse clicks.
+    """
     reporter.metrics(raw_qubits=n)
-    reporter.info(f"Generating {n} random bits and bases...")
     t_sim = time.perf_counter()
-    bits = generate_random_bits(n)
-    bases = generate_random_bases(n)
-    reporter.info(f"Generated in {time.perf_counter() - t_sim:.4f}s")
+    clicks = sample_clicks(n, link, np.random.default_rng())
+    m = len(clicks)
+    reporter.info(f"Channel: {m} of {n} pulses click at Bob "
+                  f"({int(clicks.signal.sum())} photons, {m - int(clicks.signal.sum())} background)")
+    reporter.info(f"Generating {m} random bits and bases...")
+    bits = generate_random_bits(m)
+    bases = generate_random_bases(m)
 
     reporter.info("Preparing qubits (encoding bits in quantum states)...")
-    t0 = time.perf_counter()
-    qasm_strings = prepare_qubits(bits, bases)
-    reporter.success(f"Prepared {n} qubits in {time.perf_counter() - t0:.4f}s")
-    # Time spent in the simulator (QRNG and state preparation), kept apart from protocol cost
+    photons = [i for i in range(m) if clicks.signal[i]]
+    prepared = prepare_qubits([bits[i] for i in photons], [bases[i] for i in photons])
+    qubits: list[str | None] = [None] * m
+    for i, q in zip(photons, prepared):
+        qubits[i] = q
+    reporter.success(f"Prepared {len(photons)} qubits")
+    # Time spent in the simulator (channel, QRNG, state preparation), kept apart from protocol cost
     sim_ms = (time.perf_counter() - t_sim) * 1000
 
-    # Qubits are transmitted noiselessly in this simplified protocol
     reporter.info("Sending qubits over quantum channel...")
     sent_before = channel.bytes_sent
-    channel.send_untracked(qasm_strings)
+    channel.send_untracked(encode_pulses(n, clicks.index.tolist(), qubits))
     reporter.success("Qubits transmitted")
-    reporter.metrics(sim_ms=round(sim_ms, 3), qubit_bytes=channel.bytes_sent - sent_before)
+    reporter.metrics(sim_ms=round(sim_ms, 3), qubit_bytes=channel.bytes_sent - sent_before, detected=m)
     return bits, bases
 
 
@@ -77,7 +97,7 @@ def _sift(channel: TranscriptChannel, bits: list[int], bases: list[str], reporte
     sifted = [bits[i] for i in matching]
     reporter.success(f"Sifted key: {len(sifted)} bits")
     reporter.info(f"Sift rate: {len(sifted) / len(bits) * 100:.1f}%")
-    reporter.metrics(raw_qubits=len(bits), sifted_length=len(sifted))
+    reporter.metrics(sifted_length=len(sifted))  # raw_qubits (pulses sent) was reported at step 1
 
     reporter.info("Sending matching indices to Bob...")
     channel.send_json(matching)
@@ -104,7 +124,7 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     """Alice's side of BB84 up to and including privacy amplification (steps 1 to 4)."""
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
-    bits, bases = _transmit_qubits(channel, params.num_qubits, reporter)
+    bits, bases = _transmit_qubits(channel, params.num_qubits, params.channel, reporter)
     sifted = _sift(channel, bits, bases, reporter)
     qber, sample_indices = _estimate_qber(channel, sifted, params, reporter)
 

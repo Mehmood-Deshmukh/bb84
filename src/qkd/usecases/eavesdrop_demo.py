@@ -21,6 +21,7 @@ from typing import Optional
 
 from qkd.core.bb84_protocol import qber_exceeds_threshold
 from qkd.core.config import QBER_THRESHOLD
+from qkd.core.channel_model import decode_pulses, encode_pulses
 from qkd.core.quantum_channel import eve_intercept_resend
 from qkd.services.reporting import Reporter
 from qkd.services.wire import forward_message, recv_json, send_json
@@ -46,20 +47,28 @@ def _forward_hellos(alice: socket.socket, bob: socket.socket, reporter: Reporter
 def _intercept_qubits(alice: socket.socket, bob: socket.socket, reporter: Reporter, fraction: float) -> list[Optional[str]]:
     reporter.section("Phase 1: Intercepting Quantum Channel")
     reporter.info("Intercepting qubits from Alice...")
-    qasm_strings = recv_json(alice)
-    reporter.info(f"Captured {len(qasm_strings)} qubits from Alice")
+    n, index, qubits = decode_pulses(recv_json(alice))
+    # Eve sits after the lossy fibre, in front of Bob's detector: she sees the photons that
+    # arrive (null entries are background clicks at Bob, with no photon to measure)
+    photons = [i for i, q in enumerate(qubits) if q is not None]
+    reporter.info(f"Captured {len(photons)} photons from Alice ({n} pulses sent)")
 
     reporter.info(f"Performing intercept-resend attack on {fraction:.0%} of the qubits...")
     reporter.info("  → Measuring each attacked qubit in a random basis (destroying original state)")
     reporter.info("  → Re-preparing new qubits based on measurement results")
     t0 = time.time()
-    modified_qasm, eve_bits, eve_bases = eve_intercept_resend(qasm_strings, fraction)
+    attacked, eve_bits_p, eve_bases_p = eve_intercept_resend([qubits[i] for i in photons], fraction)
+    modified: list[Optional[str]] = list(qubits)
+    eve_bits: list[Optional[int]] = [None] * len(qubits)
+    eve_bases: list[Optional[str]] = [None] * len(qubits)
+    for i, q, b, basis in zip(photons, attacked, eve_bits_p, eve_bases_p):
+        modified[i], eve_bits[i], eve_bases[i] = q, b, basis
     reporter.info(f"Attack complete in {time.time() - t0:.2f}s")
     reporter.info(f"Eve's intercepted bits: {eve_bits[:20]}... ({len(eve_bits)} total)")
     reporter.info(f"Eve's bases used:       {eve_bases[:20]}...")
 
     reporter.info("Forwarding modified qubits to Bob...")
-    send_json(bob, modified_qasm)
+    send_json(bob, encode_pulses(n, index, modified))
     reporter.info("Modified qubits sent to Bob (state has been disturbed)")
     return eve_bases
 

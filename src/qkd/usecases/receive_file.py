@@ -12,8 +12,16 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from qkd.core.bb84_protocol import discard_indices, generate_random_bases, privacy_amplification
+import numpy as np
+
+from qkd.core.bb84_protocol import (
+    discard_indices,
+    generate_random_bases,
+    generate_random_bits,
+    privacy_amplification,
+)
 from qkd.core.config import ProtocolParams
+from qkd.core.channel_model import ChannelParams, decode_pulses, misalignment_flips
 from qkd.core.quantum_channel import measure_qubits
 from qkd.services.file_stream import receive_encrypted_file, receive_file_meta, received_path
 from qkd.services.reporting import Reporter
@@ -35,23 +43,39 @@ class ReceiveResult:
     bytes_written: int = 0
 
 
-def _measure(channel: TranscriptChannel, reporter: Reporter) -> tuple[int, list[int], list[str]]:
+def _measure(
+    channel: TranscriptChannel, link: ChannelParams, reporter: Reporter
+) -> tuple[int, list[int], list[str]]:
+    """
+    Step 1 for Bob: receive the pulses that clicked, measure them, return
+    (pulses sent, bits, bases) with one bit and basis per clicked pulse.
+
+    Bob's detector is emulated here: photons are measured in a random basis and the
+    result is flipped with the misalignment probability; a click from background alone
+    (a null qubit) gives a uniformly random bit.
+    """
     reporter.info("Receiving qubits from quantum channel...")
-    qasm_strings = channel.recv_untracked()
-    reporter.success(f"Received {len(qasm_strings)} qubits")
-    reporter.metrics(raw_qubits=len(qasm_strings))
+    n, _index, qubits = decode_pulses(channel.recv_untracked())
+    m = len(qubits)
+    photons = [i for i, q in enumerate(qubits) if q is not None]
+    reporter.success(f"{m} of {n} pulses clicked ({len(photons)} photons, {m - len(photons)} background)")
+    reporter.metrics(raw_qubits=n, detected=m)
 
     reporter.info("Generating random measurement bases...")
     t_sim = time.perf_counter()
-    bases = generate_random_bases(len(qasm_strings))
+    bases = generate_random_bases(m)
 
     reporter.info("Measuring qubits (collapsing quantum states)...")
     t0 = time.perf_counter()
-    bits = measure_qubits(qasm_strings, bases)
-    reporter.success(f"Measured {len(bits)} qubits in {time.perf_counter() - t0:.2f}s")
+    measured = measure_qubits([qubits[i] for i in photons], [bases[i] for i in photons])
+    flips = misalignment_flips(len(photons), link, np.random.default_rng())
+    bits = generate_random_bits(m)  # background clicks keep these random bits
+    for i, bit, flip in zip(photons, measured, flips):
+        bits[i] = bit ^ int(flip)
+    reporter.success(f"Measured {len(photons)} qubits in {time.perf_counter() - t0:.2f}s")
     # Time spent in the simulator (QRNG and measurement), kept apart from protocol cost
     reporter.metrics(sim_ms=round((time.perf_counter() - t_sim) * 1000, 3))
-    return len(qasm_strings), bits, bases
+    return n, bits, bases
 
 
 def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str], reporter: Reporter) -> list[int]:
@@ -65,9 +89,9 @@ def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str
 
     reporter.section("Phase 3: Key Sifting & QBER Estimation")
     sifted = [bits[i] for i in matching]
-    reporter.success(f"Sifted key: {len(sifted)} bits (from {raw} raw qubits)")
-    reporter.info(f"Sift rate: {len(sifted) / raw * 100:.1f}%")
-    reporter.metrics(raw_qubits=raw, sifted_length=len(sifted))
+    reporter.success(f"Sifted key: {len(sifted)} bits (from {len(bits)} detected of {raw} pulses)")
+    reporter.info(f"Sift rate: {len(sifted) / max(1, len(bits)) * 100:.1f}% of detected pulses")
+    reporter.metrics(sifted_length=len(sifted))
     return sifted
 
 
@@ -87,7 +111,7 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     """Bob's side of BB84 up to and including privacy amplification (steps 1 to 4)."""
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
-    raw, bits, bases = _measure(channel, reporter)
+    raw, bits, bases = _measure(channel, params.channel, reporter)
     sifted = _sift(channel, raw, bits, bases, reporter)
     qber, sample_indices = _answer_qber_sample(channel, sifted, reporter)
 

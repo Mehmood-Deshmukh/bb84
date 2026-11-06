@@ -8,8 +8,10 @@ QKD_<NAME>, for example QKD_NUM_QUBITS=256. Values are read once, at import.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, TypeVar
+
+from qkd.core.channel_model import PRESETS, ChannelParams, preset
 
 T = TypeVar("T")
 
@@ -94,6 +96,33 @@ def _cast_tofu(raw: str) -> int:
 # small sizes) should turn this off; the key is then NOT provably secure.
 ENFORCE_FINITE_KEY = bool(_env("ENFORCE_FINITE_KEY", 1, _cast_tofu))
 
+# ─────────────────────────────────────────────
+# Quantum channel (core/channel_model.py)
+# ─────────────────────────────────────────────
+# A named parameter set at a fibre length; any single value can be overridden.
+# The default "ideal" channel loses nothing and adds no errors (the original protocol).
+CHANNEL_PRESET = _env("CHANNEL_PRESET", "ideal", str)
+CHANNEL_LENGTH_KM = _env("CHANNEL_LENGTH_KM", 0.0, float)
+FIBER_LOSS_DB_PER_KM = _env("FIBER_LOSS_DB_PER_KM", None, float)  # alpha
+DETECTOR_EFFICIENCY = _env("DETECTOR_EFFICIENCY", None, float)  # eta_Bob
+DARK_COUNT_PROB = _env("DARK_COUNT_PROB", None, float)  # Y0, per pulse
+MISALIGNMENT = _env("MISALIGNMENT", None, float)  # e_d
+
+
+def _channel() -> ChannelParams:
+    if CHANNEL_PRESET not in PRESETS:
+        raise ValueError(f"Invalid value for QKD_CHANNEL_PRESET: {CHANNEL_PRESET!r}. Known: {', '.join(PRESETS)}")
+    overrides = {name: value for name, value in (
+        ("loss_db_per_km", FIBER_LOSS_DB_PER_KM),
+        ("detector_efficiency", DETECTOR_EFFICIENCY),
+        ("dark_count_prob", DARK_COUNT_PROB),
+        ("misalignment", MISALIGNMENT),
+    ) if value is not None}
+    return replace(preset(CHANNEL_PRESET, CHANNEL_LENGTH_KM), **overrides)
+
+
+CHANNEL = _channel()
+
 AUTH_MODE = _env("AUTH_MODE", "hybrid", _validate_auth_mode)
 IDENTITY_DIR = _env("IDENTITY_DIR", "identity", str)
 KNOWN_PEERS_FILE = _env("KNOWN_PEERS_FILE", "known_peers.json", str)
@@ -112,6 +141,9 @@ class ProtocolParams:
     eps_sec: float = EPS_SEC
     eps_cor: float = EPS_COR
     enforce_finite_key: bool = ENFORCE_FINITE_KEY
+    # Physics, not policy: not negotiated in the hello. Alice's side applies loss and
+    # background clicks, Bob's side the misalignment error (see channel_model.py).
+    channel: ChannelParams = CHANNEL
 
     def security_policy(self) -> dict:
         """

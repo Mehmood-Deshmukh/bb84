@@ -123,4 +123,5 @@ figures:
     xlabel: Added round-trip time (ms)
     ylabel: Milliseconds, simulator time excluded
     title: Protocol time vs network round-trip time
+    direct_labels: false  # sign and hybrid lines overlap, end labels would collide
     legend_loc: upper left

@@ -106,3 +106,22 @@ def test_auth_mode_invalid_rejected() -> None:
     with pytest.raises(RuntimeError, match="QKD_AUTH_MODE"):
         read_config({"QKD_AUTH_MODE": "invalid_mode"}, "AUTH_MODE")
 
+
+
+def test_channel_preset_length_and_overrides() -> None:
+    code = ("import json; from qkd.core.config import CHANNEL; from dataclasses import asdict; "
+            "print(json.dumps(asdict(CHANNEL)))")
+    env = {**os.environ, "QKD_CHANNEL_PRESET": "GYS", "QKD_CHANNEL_LENGTH_KM": "50", "QKD_MISALIGNMENT": "0.01"}
+    out = json.loads(subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
+                                    check=True).stdout)
+    assert out == {"length_km": 50.0, "loss_db_per_km": 0.21, "detector_efficiency": 0.045,
+                   "dark_count_prob": 1.7e-6, "misalignment": 0.01}
+    default = json.loads(subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                        check=True, env={k: v for k, v in os.environ.items()
+                                                         if not k.startswith("QKD_")}).stdout)
+    assert default["detector_efficiency"] == 1.0 and default["length_km"] == 0.0  # ideal
+
+
+def test_unknown_channel_preset_is_rejected() -> None:
+    with pytest.raises(RuntimeError, match="QKD_CHANNEL_PRESET"):
+        read_config({"QKD_CHANNEL_PRESET": "bogus"}, "CHANNEL")

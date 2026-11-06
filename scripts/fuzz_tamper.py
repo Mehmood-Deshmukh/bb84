@@ -132,7 +132,7 @@ def _change_number(value: Any, in_list: bool, rng: random.Random) -> Any:
     return value
 
 
-def flip_one_qubit(qubits: list[str], rng: random.Random) -> list[str]:
+def flip_one_qubit(qubits: list[str | None], rng: random.Random) -> list[str | None]:
     """
     Flip the encoded bit of one random qubit: an X right after the register
     declaration, before any existing gates, flips the bit in either basis. (A qubit
@@ -140,7 +140,10 @@ def flip_one_qubit(qubits: list[str], rng: random.Random) -> list[str]:
     newline; matching the declaration alone handles that case.)
     """
     out = list(qubits)
-    i = rng.randrange(len(out))
+    photons = [k for k, q in enumerate(out) if q is not None]  # null = background click, no photon
+    if not photons:
+        return out
+    i = rng.choice(photons)
     out[i] = out[i].replace("qreg q[1];", "qreg q[1];\nx q[0];", 1)
     return out
 
@@ -149,7 +152,8 @@ def semantic(raw: bytes, step: str, rng: random.Random) -> bytes:
     """Change one value so the message still parses; see the module docstring."""
     doc = json.loads(raw)
     if step == "1":
-        return json.dumps(flip_one_qubit(doc, rng)).encode()
+        # The pulse message (channel_model.encode_pulses): flip one arriving photon
+        return json.dumps({**doc, "qubits": flip_one_qubit(doc["qubits"], rng)}).encode()
     paths = [p for p in _leaves(doc) if _get(doc, p) is not None]
     path = rng.choice(paths)
     old = _get(doc, path)

@@ -47,7 +47,7 @@ from qkd.services.reporting import Reporter
 from qkd.services.transcript import TranscriptChannel
 from qkd.usecases.common import AuthContext, KeyConfirmationError, PeerAuthError
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3  # 3: qubit message carries pulse indices (channel_model.encode_pulses)
 MODES = ("none", "sign", "hybrid")
 NONCE_BYTES = 32
 ID_PK_BYTES = 1952  # ML-DSA-65 public key

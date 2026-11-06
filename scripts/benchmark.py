@@ -88,7 +88,7 @@ STAGES = [
     "file_transfer",
 ]
 METRICS = [
-    "raw_qubits", "sifted_length", "sample_size", "qber", "secure_key_bits", "key_bits",
+    "raw_qubits", "detected", "sifted_length", "sample_size", "qber", "secure_key_bits", "key_bits",
     "handshake_ms", "auth_overhead_bytes", "qubit_bytes", "channel_bytes", "file_wire_bytes",
 ]
 SPECIAL = {"mode", "payload_bytes", "eve_fraction", "rtt_ms"}
