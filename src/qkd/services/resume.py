@@ -22,8 +22,16 @@ from dataclasses import asdict, dataclass
 from typing import Optional
 
 from qkd.core.config import RESUME_SYNC_CHUNKS
-from qkd.core.crypto_utils import decrypt_chunk, derive_chunk_nonce
-from qkd.services.file_stream import MAX_CHUNKS, TAG_SIZE, FileMeta, ProgressCallback, file_sha256, received_path
+from qkd.core.crypto_utils import decrypt_chunk, derive_chunk_nonce, key_schedule
+from qkd.services.file_stream import (
+    MAX_CHUNKS,
+    TAG_SIZE,
+    FileMeta,
+    ProgressCallback,
+    expected_chunks,
+    file_sha256,
+    received_path,
+)
 from qkd.services.wire import recv_bytes
 
 STATE_DIRNAME = ".resume"
@@ -61,7 +69,7 @@ def validate_meta(meta: FileMeta) -> None:
     """Reject metadata a resumable receive cannot trust (raises ResumeError)."""
     if meta.chunk_size <= 0 or meta.total_size < 0:
         raise ResumeError("metadata has a non-positive chunk size or a negative size")
-    if meta.num_chunks != (meta.total_size + meta.chunk_size - 1) // meta.chunk_size:
+    if meta.num_chunks != expected_chunks(meta.total_size, meta.chunk_size):
         raise ResumeError("metadata num_chunks does not match total_size and chunk_size")
     if meta.num_chunks > MAX_CHUNKS:
         raise ResumeError("metadata has more chunks than the nonce counter allows")
@@ -111,7 +119,7 @@ def _valid_state(raw: object, transfer_id: str) -> Optional[ResumeState]:
         return None
     if state.chunk_size <= 0 or state.total_size < 0 or state.num_chunks > MAX_CHUNKS:
         return None
-    if state.num_chunks != (state.total_size + state.chunk_size - 1) // state.chunk_size:
+    if state.num_chunks != expected_chunks(state.total_size, state.chunk_size):
         return None
     if not 0 <= state.next_chunk <= state.num_chunks:
         return None
@@ -238,7 +246,7 @@ def receive_encrypted_file_resumable(
     meta: FileMeta,
     store: ResumeStore,
     state: ResumeState,
-    aes_key: bytes,
+    session_key: bytes,
     start_chunk: int,
     on_progress: Optional[ProgressCallback] = None,
     sync_every: int = RESUME_SYNC_CHUNKS,
@@ -252,6 +260,7 @@ def receive_encrypted_file_resumable(
     The final file appears only after the size and the whole-file SHA-256 check out; a mismatch there
     discards the state (the data is bad) and raises ResumeError.
     """
+    file_key = key_schedule(session_key).file
     sync_every = max(1, sync_every)
     verified = start_chunk
     since_sync = 0
@@ -261,7 +270,7 @@ def receive_encrypted_file_resumable(
             for i in range(start_chunk, meta.num_chunks):
                 data = recv_bytes(sock)
                 tag, ciphertext = data[:TAG_SIZE], data[TAG_SIZE:]
-                plaintext = decrypt_chunk(ciphertext, aes_key, derive_chunk_nonce(meta.base_nonce, i), tag, meta.aad)
+                plaintext = decrypt_chunk(ciphertext, file_key, derive_chunk_nonce(meta.base_nonce, i), tag, meta.aad)
                 if len(plaintext) != chunk_boundary(i + 1, meta.chunk_size, meta.total_size) - chunk_boundary(i, meta.chunk_size, meta.total_size):
                     raise ResumeError(f"chunk {i} has the wrong length")
                 f.write(plaintext)

@@ -293,3 +293,20 @@ class TestBuildAuthNoForbiddenImports:
                 f"runner/bob.py must not import from {forbidden}"
             )
 
+
+
+class TestEveParseArgs:
+    def test_fraction_defaults_to_every_qubit(self) -> None:
+        from qkd.runner.eve import parse_args as eve_parse_args
+
+        assert eve_parse_args([]).fraction == 1.0
+        assert eve_parse_args(["--fraction", "0.25"]).fraction == 0.25
+
+    def test_fraction_out_of_range_is_rejected(self) -> None:
+        import pytest
+
+        from qkd.runner.eve import parse_args as eve_parse_args
+
+        for bad in ("-0.1", "1.5"):
+            with pytest.raises(SystemExit):
+                eve_parse_args(["--fraction", bad])

@@ -5,7 +5,7 @@
 /**
  * @typedef {'pending'|'accepted'|'key_exchange'|'transferring'|'interrupted'|'completed'|'rejected'|'aborted_qber'|'aborted_auth'|'failed'|'cancelled'} TransferStatus
  * @typedef {'outgoing'|'incoming'} Direction
- * @typedef {'connecting'|'authentication'|'quantum_transmission'|'sifting'|'qber_estimation'|'privacy_amplification'|'key_confirmation'|'file_transfer'|'done'} Stage
+ * @typedef {'connecting'|'authentication'|'quantum_transmission'|'sifting'|'qber_estimation'|'reconciliation'|'privacy_amplification'|'key_confirmation'|'file_transfer'|'done'} Stage
  * @typedef {'new'|'pinned'|'verified'} PeerTrust
  *
  * @typedef {object} PeerRef
@@ -110,6 +110,7 @@ export const STAGES = [
   'quantum_transmission',
   'sifting',
   'qber_estimation',
+  'reconciliation',
   'privacy_amplification',
   'key_confirmation',
   'file_transfer',

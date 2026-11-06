@@ -13,9 +13,14 @@ history.json
 node_state.json
 node_state-uploads/
 identity/
+id-*/
+*.seed
 known_peers.json
 experiments/results/
 experiments/figures/
+
+# Local notes and plans (e.g. experiments/ignore-INSIGHTS.md)
+**/ignore-*
 
 # Archives
 **/*.zip

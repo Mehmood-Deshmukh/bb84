@@ -23,7 +23,24 @@ def read_config(env: dict[str, str], *names: str) -> dict:
 
 def test_defaults() -> None:
     values = read_config({}, "NUM_QUBITS", "QBER_THRESHOLD", "CHUNK_SIZE", "BOB_PORT")
-    assert values == {"NUM_QUBITS": 128, "QBER_THRESHOLD": 0.11, "CHUNK_SIZE": 65536, "BOB_PORT": 65432}
+    assert values == {"NUM_QUBITS": 8192, "QBER_THRESHOLD": 0.11, "CHUNK_SIZE": 65536, "BOB_PORT": 65432}
+
+
+def test_finite_key_defaults_and_overrides() -> None:
+    names = ("EPS_SEC", "EPS_COR", "ENFORCE_FINITE_KEY", "FINAL_KEY_BITS")
+    assert read_config({}, *names) == {"EPS_SEC": 1e-10, "EPS_COR": 1e-15, "ENFORCE_FINITE_KEY": True,
+                                       "FINAL_KEY_BITS": 256}
+    env = {"QKD_EPS_SEC": "1e-6", "QKD_EPS_COR": "1e-9", "QKD_ENFORCE_FINITE_KEY": "false"}
+    assert read_config(env, *names[:3]) == {"EPS_SEC": 1e-6, "EPS_COR": 1e-9, "ENFORCE_FINITE_KEY": False}
+
+
+def test_security_policy_lists_the_values_peers_must_share() -> None:
+    from qkd.core.config import ProtocolParams
+
+    policy = ProtocolParams(final_key_bits=128, eps_sec=1e-6, eps_cor=1e-9, qber_threshold=0.05,
+                            enforce_finite_key=False).security_policy()
+    assert policy == {"final_key_bits": 128, "eps_sec": 1e-6, "eps_cor": 1e-9, "qber_threshold": 0.05,
+                      "enforce_finite_key": False, "reconciliation": "none"}
 
 
 def test_env_overrides() -> None:
@@ -89,3 +106,22 @@ def test_auth_mode_invalid_rejected() -> None:
     with pytest.raises(RuntimeError, match="QKD_AUTH_MODE"):
         read_config({"QKD_AUTH_MODE": "invalid_mode"}, "AUTH_MODE")
 
+
+
+def test_channel_preset_length_and_overrides() -> None:
+    code = ("import json; from qkd.core.config import CHANNEL; from dataclasses import asdict; "
+            "print(json.dumps(asdict(CHANNEL)))")
+    env = {**os.environ, "QKD_CHANNEL_PRESET": "GYS", "QKD_CHANNEL_LENGTH_KM": "50", "QKD_MISALIGNMENT": "0.01"}
+    out = json.loads(subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
+                                    check=True).stdout)
+    assert out == {"length_km": 50.0, "loss_db_per_km": 0.21, "detector_efficiency": 0.045,
+                   "dark_count_prob": 1.7e-6, "misalignment": 0.01}
+    default = json.loads(subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                        check=True, env={k: v for k, v in os.environ.items()
+                                                         if not k.startswith("QKD_")}).stdout)
+    assert default["detector_efficiency"] == 1.0 and default["length_km"] == 0.0  # ideal
+
+
+def test_unknown_channel_preset_is_rejected() -> None:
+    with pytest.raises(RuntimeError, match="QKD_CHANNEL_PRESET"):
+        read_config({"QKD_CHANNEL_PRESET": "bogus"}, "CHANNEL")

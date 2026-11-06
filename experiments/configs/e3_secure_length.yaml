@@ -1,0 +1,12 @@
+# E3: finite-key secure length against raw qubits on a clean channel.
+# The gate is off so runs below the 256-bit cut-off still complete and report
+# secure_key_bits. Also records qubit_bytes and sim_s for the cost of larger N.
+name: e3_secure_length
+description: Finite-key secure bits, qubit stream size, and simulation time vs raw qubits
+repeats: 10
+fixed:
+  mode: none
+  payload_bytes: 1000
+  QKD_ENFORCE_FINITE_KEY: 0
+grid:
+  QKD_NUM_QUBITS: [1024, 2048, 4096, 6144, 8192, 12288, 16384, 32768]

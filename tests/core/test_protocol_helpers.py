@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 import pytest
 
 from qkd.core.bb84_protocol import (
@@ -9,7 +11,9 @@ from qkd.core.bb84_protocol import (
     compute_qber,
     discard_indices,
     matching_basis_indices,
+    privacy_amplification,
     qber_exceeds_threshold,
+    toeplitz_seed_bytes,
 )
 
 
@@ -23,6 +27,20 @@ def test_sample_indices_sorted_unique_in_range(n: int) -> None:
     assert idx == sorted(set(idx))
     assert all(0 <= i < n for i in idx)
     assert len(idx) == min(n, max(1, int(n * 0.15)))
+
+
+def test_sampling_and_salt_ignore_the_random_module_seed() -> None:
+    """
+    Sample positions and the salt must come from the OS CSPRNG. If they used the
+    random module, reseeding it would reproduce them.
+    """
+    runs = []
+    for _ in range(2):
+        random.seed(1234)
+        runs.append((choose_sample_indices(1000, 0.15), privacy_amplification([0, 1] * 64)[0]))
+    assert runs[0][0] != runs[1][0]
+    assert runs[0][1] != runs[1][1]
+    assert len(runs[0][1]) == toeplitz_seed_bytes(128, 256)
 
 
 def test_compute_qber() -> None:

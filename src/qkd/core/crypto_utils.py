@@ -13,8 +13,9 @@ AES-GCM (Galois/Counter Mode) provides:
 from __future__ import annotations
 import os
 import struct
+from dataclasses import dataclass
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 from cryptography.hazmat.primitives import hashes
 
 
@@ -137,6 +138,36 @@ def open_resume_message(session_key: bytes, role: str, blob: bytes, aad: bytes) 
         raise InvalidTag()
     nonce, sealed = blob[:_RESUME_NONCE_BYTES], blob[_RESUME_NONCE_BYTES:]
     return AESGCM(derive_resume_key(session_key, role)).decrypt(nonce, sealed, aad)
+
+
+@dataclass(frozen=True)
+class SessionKeys:
+    """Independent subkeys expanded from one session key."""
+
+    file: bytes  # AES-256-GCM key for the file chunks
+    metadata: bytes  # AES-256-GCM key for the single metadata message
+    confirm: bytes  # HMAC-SHA256 key for the key confirmation tags (step 4b)
+
+
+def key_schedule(session_key: bytes) -> SessionKeys:
+    """
+    Expand the session key into one subkey per use with HKDF-Expand (RFC 5869).
+
+    The session key is already the output of HKDF-Extract (derive_session_key),
+    so it is used directly as the pseudorandom key. Distinct info labels make the
+    three subkeys independent: revealing a confirmation tag says nothing useful
+    about the file key, and the metadata and chunk ciphertexts never share a key,
+    so their nonces cannot collide.
+    """
+
+    def expand(label: bytes) -> bytes:
+        return HKDFExpand(algorithm=hashes.SHA256(), length=32, info=label).derive(session_key)
+
+    return SessionKeys(
+        file=expand(b"bb84-file-v1"),
+        metadata=expand(b"bb84-metadata-v1"),
+        confirm=expand(b"bb84-confirm-v1"),
+    )
 
 
 def encrypt_file(filepath: str, key: bytes) -> tuple[bytes, bytes, bytes, str]:

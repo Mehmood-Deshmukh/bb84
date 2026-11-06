@@ -19,7 +19,10 @@ introducing detectable errors (~25% QBER).
 """
 
 from __future__ import annotations
-from qiskit import QuantumCircuit, transpile
+import secrets
+from typing import Optional
+
+from qiskit import QuantumCircuit
 from qiskit_aer import Aer
 from qiskit.qasm2 import dumps
 
@@ -27,6 +30,8 @@ from qkd.core.bb84_protocol import generate_random_bases
 
 # Shared simulator backend
 _backend = Aer.get_backend("qasm_simulator")
+# Eve picks which qubits to attack with the OS CSPRNG
+_csprng = secrets.SystemRandom()
 
 
 # ─────────────────────────────────────────────
@@ -64,14 +69,17 @@ def prepare_qubits(bits: list[int], bases: list[str]) -> list[str]:
 # Eavesdropper Interception (Eve's Attack)
 # ─────────────────────────────────────────────
 
-def eve_intercept_resend(qasm_strings: list[str]) -> tuple[list[str], list[int], list[str]]:
+def eve_intercept_resend(
+    qasm_strings: list[str], fraction: float = 1.0
+) -> tuple[list[str], list[Optional[int]], list[Optional[str]]]:
     """
-    Simulate Eve's intercept-resend attack.
+    Simulate Eve's intercept-resend attack on a `fraction` of the qubits.
 
     Eve's Strategy:
-      1. Choose a random measurement basis for each qubit
-      2. Measure the qubit (collapsing its state — Measurement Disturbance)
-      3. Re-prepare a new qubit based on her measurement result
+      1. Pick which qubits to attack: each one independently with probability
+         `fraction` (1.0 attacks every qubit)
+      2. Measure each attacked qubit in a random basis (collapsing its state)
+      3. Re-prepare a new qubit from her result; the others pass untouched
 
     Why This Causes Errors:
       - If Eve's basis matches Alice's, she gets the correct bit and
@@ -79,32 +87,45 @@ def eve_intercept_resend(qasm_strings: list[str]) -> tuple[list[str], list[int],
       - If Eve's basis differs (50% chance), her measurement gives a
         random result, and she re-prepares in the wrong state → 50%
         chance of error when Bob measures in Alice's basis.
-      - Overall: ~25% QBER introduced (0.5 × 0.5 = 0.25)
+      - Overall: about fraction / 4 of the sifted bits are wrong
+        (25% QBER for a full attack).
 
     The No-Cloning Theorem prevents Eve from copying the qubit first;
     she MUST measure it, destroying the original state.
 
     Returns:
-        (modified_qasm_strings, eve_bits, eve_bases)
+        (modified_qasm_strings, eve_bits, eve_bases), with None in eve_bits and
+        eve_bases at positions Eve left alone.
     """
-    eve_bases = generate_random_bases(len(qasm_strings))
-    eve_bits = []
-    new_qasm = []
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError(f"fraction must be in [0, 1], got {fraction}")
+    n = len(qasm_strings)
+    attacked = [i for i in range(n) if fraction >= 1.0 or _csprng.random() < fraction]
+    bases = generate_random_bases(len(attacked))
+    measured = measure_qubits([qasm_strings[i] for i in attacked], bases)
+    replaced = prepare_qubits(measured, bases)
 
-    for qasm_str, eve_basis in zip(qasm_strings, eve_bases):
-        # Eve measures
-        measured_bit = measure_qubit(qasm_str, eve_basis)
-        eve_bits.append(measured_bit)
-
-        # Eve re-prepares based on her measurement
-        new_qasm.append(prepare_qubit(measured_bit, eve_basis))
-
+    new_qasm = list(qasm_strings)
+    eve_bits: list[Optional[int]] = [None] * n
+    eve_bases: list[Optional[str]] = [None] * n
+    for i, bit, basis, qasm in zip(attacked, measured, bases, replaced):
+        new_qasm[i], eve_bits[i], eve_bases[i] = qasm, bit, basis
     return new_qasm, eve_bits, eve_bases
 
 
 # ─────────────────────────────────────────────
 # Qubit Measurement (Bob's side)
 # ─────────────────────────────────────────────
+
+def _measurement_circuit(qasm_str: str, basis: str) -> QuantumCircuit:
+    """The received qubit followed by a measurement in `basis`."""
+    qc = QuantumCircuit(1, 1)
+    qc.compose(QuantumCircuit.from_qasm_str(qasm_str), inplace=True)
+    if basis == "x":
+        qc.h(0)  # Rotate back to computational basis before measurement
+    qc.measure(0, 0)
+    return qc
+
 
 def measure_qubit(qasm_str: str, basis: str) -> int:
     """
@@ -117,26 +138,20 @@ def measure_qubit(qasm_str: str, basis: str) -> int:
     This is why BB84 works: only matching-basis measurements yield
     correlated bits between Alice and Bob.
     """
-    qc_orig = QuantumCircuit.from_qasm_str(qasm_str)
-
-    # Build a fresh circuit with exactly 1 qubit and 1 classical bit
-    qc = QuantumCircuit(1, 1)
-    qc.compose(qc_orig, inplace=True)
-
-    if basis == "x":
-        qc.h(0)  # Rotate back to computational basis before measurement
-
-    qc.measure(0, 0)
-
-    compiled = transpile(qc, _backend)
-    result = _backend.run(compiled, shots=1).result()
-    counts = result.get_counts()
-
-    # Extract the measured bit
-    bitstring = list(counts.keys())[0]
-    return int(bitstring[-1])
+    return measure_qubits([qasm_str], [basis])[0]
 
 
 def measure_qubits(qasm_strings: list[str], bases: list[str]) -> list[int]:
-    """Measure a batch of qubits in their respective bases."""
-    return [measure_qubit(q, b) for q, b in zip(qasm_strings, bases)]
+    """
+    Measure a batch of qubits in their respective bases.
+
+    Every qubit is still its own one-qubit circuit measured once, so the
+    physics is unchanged; the circuits are just submitted to Aer as one job.
+    They use only x, h, and measure, which Aer runs natively, so there is no
+    transpile step. This is about 250 times faster than one job per qubit.
+    """
+    if not qasm_strings:
+        return []
+    circuits = [_measurement_circuit(q, b) for q, b in zip(qasm_strings, bases)]
+    result = _backend.run(circuits, shots=1, memory=True).result()
+    return [int(result.get_memory(i)[0]) for i in range(len(circuits))]

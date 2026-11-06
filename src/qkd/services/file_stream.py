@@ -1,10 +1,23 @@
 """
 Chunked AES-256-GCM file streaming (the final phase of the wire protocol).
 
-Sender: one JSON metadata message, then one length-prefixed `tag(16B) + ciphertext`
-message per chunk. Chunk i is encrypted with nonce = base_nonce(8B) || i(4B).
-Every chunk carries SHA-256 of the canonical metadata JSON as GCM AAD, so a changed
-metadata message fails authentication on chunk 0.
+Both functions take the session key and split it with crypto_utils.key_schedule.
+
+Sender: one encrypted metadata message, `tag(16B) + ciphertext` of the canonical
+metadata JSON under the metadata subkey (fixed all-zero nonce, which is safe
+because that subkey encrypts exactly one message), then one `tag(16B) + ciphertext`
+message per chunk under the file subkey. Chunk i is encrypted with
+nonce = base_nonce(8B) || i(4B). Every chunk also carries SHA-256 of the canonical
+metadata JSON as GCM AAD, which ties the chunk stream to that metadata.
+
+The metadata is encrypted so that a passive observer does not learn the filename
+or the exact file size (only the total ciphertext length, about the same thing
+rounded to the chunk framing).
+
+There is always at least one chunk (an empty file is sent as one chunk of empty
+plaintext), and the receiver rejects metadata whose num_chunks does not match
+total_size and chunk_size. Without both rules a metadata message claiming zero
+chunks would be accepted without any tag ever being checked.
 """
 
 from __future__ import annotations
@@ -16,12 +29,40 @@ import socket
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from cryptography.exceptions import InvalidTag
+
 from qkd.core.config import CHUNK_SIZE
-from qkd.core.crypto_utils import decrypt_chunk, derive_chunk_nonce, encrypt_chunk
-from qkd.services.wire import recv_bytes, recv_json, send_bytes, send_json
+from qkd.core.crypto_utils import decrypt_chunk, derive_chunk_nonce, encrypt_chunk, key_schedule
+from qkd.services.wire import recv_bytes, send_bytes
 
 TAG_SIZE = 16
-MAX_CHUNKS = 2**32  # the chunk counter in the nonce is 4 bytes
+METADATA_NONCE = bytes(12)
+METADATA_AAD = b"qkd-file-meta-v1"
+WIRE_PREFIX = 4  # length prefix in front of every wire message
+BASE_NONCE_SIZE = 8
+MAX_CHUNKS = 1 << 32  # the chunk counter in the nonce is 4 bytes
+
+
+class MetadataError(ValueError):
+    """The file metadata message is malformed or does not describe the data that followed."""
+
+
+def expected_chunks(total_size: int, chunk_size: int) -> int:
+    """
+    Number of chunks used for a file of total_size bytes.
+
+    Always at least 1, so every transfer, even of an empty file, is checked by
+    at least one GCM tag.
+    """
+    return max(1, -(-total_size // chunk_size))
+
+
+def _int_field(msg: dict, name: str) -> int:
+    value = msg.get(name)
+    # bool is a subclass of int, so rule it out explicitly
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise MetadataError(f"metadata field {name!r} must be an integer")
+    return value
 
 # Called after each chunk with (chunks_done, num_chunks, bytes_done)
 ProgressCallback = Callable[[int, int, int], None]
@@ -57,21 +98,73 @@ class FileMeta:
 
     @classmethod
     def from_message(cls, msg: dict) -> "FileMeta":
+        """
+        Parse and check a metadata message.
+
+        Raises MetadataError if a field is missing or has the wrong type, or if
+        num_chunks is not expected_chunks(total_size, chunk_size).
+        """
+        if not isinstance(msg, dict):
+            raise MetadataError("metadata must be a JSON object")
+        filename = msg.get("filename")
+        if not isinstance(filename, str):
+            raise MetadataError("metadata field 'filename' must be a string")
+        total_size = _int_field(msg, "total_size")
+        chunk_size = _int_field(msg, "chunk_size")
+        num_chunks = _int_field(msg, "num_chunks")
+        if total_size < 0 or chunk_size <= 0:
+            raise MetadataError("metadata sizes out of range")
+        if num_chunks != expected_chunks(total_size, chunk_size) or num_chunks > MAX_CHUNKS:
+            raise MetadataError(
+                f"metadata num_chunks={num_chunks} does not match total_size={total_size}, chunk_size={chunk_size}"
+            )
+        try:
+            base_nonce = bytes.fromhex(msg.get("base_nonce"))
+        except (TypeError, ValueError):
+            raise MetadataError("metadata field 'base_nonce' must be hex") from None
+        if len(base_nonce) != BASE_NONCE_SIZE:
+            raise MetadataError(f"metadata base_nonce must be {BASE_NONCE_SIZE} bytes")
         return cls(
-            filename=msg["filename"],
-            total_size=msg["total_size"],
-            chunk_size=msg["chunk_size"],
-            num_chunks=msg["num_chunks"],
-            base_nonce=bytes.fromhex(msg["base_nonce"]),
+            filename=filename,
+            total_size=total_size,
+            chunk_size=chunk_size,
+            num_chunks=num_chunks,
+            base_nonce=base_nonce,
             aad=metadata_aad(msg),
             sha256=msg.get("sha256"),
             resume_offset=msg.get("resume_offset"),
         )
 
 
+def _canonical(msg: dict) -> bytes:
+    return json.dumps(msg, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 def metadata_aad(msg: dict) -> bytes:
     """SHA-256 of the canonical JSON (sorted keys, compact, UTF-8) of a metadata message."""
-    return hashlib.sha256(json.dumps(msg, sort_keys=True, separators=(",", ":")).encode("utf-8")).digest()
+    return hashlib.sha256(_canonical(msg)).digest()
+
+
+def encrypt_metadata(msg: dict, metadata_key: bytes) -> bytes:
+    """`tag + ciphertext` of the canonical metadata JSON. The key must encrypt nothing else."""
+    ciphertext, tag = encrypt_chunk(_canonical(msg), metadata_key, METADATA_NONCE, METADATA_AAD)
+    return tag + ciphertext
+
+
+def decrypt_metadata(data: bytes, metadata_key: bytes) -> dict:
+    """
+    Inverse of encrypt_metadata.
+
+    Raises InvalidTag if the message was changed or encrypted under another key,
+    and MetadataError if it decrypts to something that is not JSON.
+    """
+    if len(data) < TAG_SIZE:
+        raise InvalidTag()
+    plaintext = decrypt_chunk(data[TAG_SIZE:], metadata_key, METADATA_NONCE, data[:TAG_SIZE], METADATA_AAD)
+    try:
+        return json.loads(plaintext)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise MetadataError("metadata is not valid JSON") from None
 
 
 def describe_file(
@@ -88,7 +181,7 @@ def describe_file(
     session it continues. with_sha256 and resume_offset are for resume mode (see FileMeta).
     """
     size = os.path.getsize(filepath)
-    num_chunks = (size + chunk_size - 1) // chunk_size
+    num_chunks = expected_chunks(size, chunk_size)
     if num_chunks > MAX_CHUNKS:
         raise ValueError(f"{num_chunks} chunks exceed the {MAX_CHUNKS} the 4-byte nonce counter allows")
     return FileMeta(
@@ -96,7 +189,7 @@ def describe_file(
         total_size=size,
         chunk_size=chunk_size,
         num_chunks=num_chunks,
-        base_nonce=os.urandom(8),
+        base_nonce=os.urandom(BASE_NONCE_SIZE),
         sha256=file_sha256(filepath) if with_sha256 else None,
         resume_offset=resume_offset,
     )
@@ -120,65 +213,80 @@ def file_sha256(filepath: str, limit: Optional[int] = None) -> str:
 def send_encrypted_file(
     sock: socket.socket,
     filepath: str,
-    aes_key: bytes,
+    session_key: bytes,
     meta: FileMeta,
     on_progress: Optional[ProgressCallback] = None,
     start_chunk: int = 0,
-) -> None:
+) -> int:
     """
-    Send the metadata message followed by the encrypted chunks start_chunk..num_chunks-1.
+    Send the encrypted metadata message followed by the encrypted chunks start_chunk..num_chunks-1.
 
     Chunk i always uses nonce base_nonce || i, whatever start_chunk is. progress counts from
     the offset: the first callback reports start_chunk + 1 chunks done.
+    Returns the bytes put on the wire, including each 4-byte length prefix.
     """
     if not 0 <= start_chunk <= meta.num_chunks:
         raise ValueError(f"start_chunk {start_chunk} is outside 0..{meta.num_chunks}")
     if meta.resume_offset is not None and meta.resume_offset != start_chunk:
         raise ValueError("metadata resume_offset does not match start_chunk")
+    keys = key_schedule(session_key)
     msg = meta.to_message()
-    send_json(sock, msg)
+    encrypted_meta = encrypt_metadata(msg, keys.metadata)
+    send_bytes(sock, encrypted_meta)
+    wire_bytes = WIRE_PREFIX + len(encrypted_meta)
     aad = metadata_aad(msg)
     sent = min(start_chunk * meta.chunk_size, meta.total_size)
     with open(filepath, "rb") as f:
         f.seek(start_chunk * meta.chunk_size)
         for i in range(start_chunk, meta.num_chunks):
             plaintext = f.read(meta.chunk_size)
-            ciphertext, tag = encrypt_chunk(plaintext, aes_key, derive_chunk_nonce(meta.base_nonce, i), aad)
+            ciphertext, tag = encrypt_chunk(plaintext, keys.file, derive_chunk_nonce(meta.base_nonce, i), aad)
             send_bytes(sock, tag + ciphertext)
+            wire_bytes += WIRE_PREFIX + len(tag) + len(ciphertext)
             sent += len(plaintext)
             if on_progress:
                 on_progress(i + 1, meta.num_chunks, sent)
+    return wire_bytes
 
 
-def receive_file_meta(sock: socket.socket) -> FileMeta:
-    return FileMeta.from_message(recv_json(sock))
+def receive_file_meta(sock: socket.socket, session_key: bytes) -> FileMeta:
+    """
+    Receive, decrypt, and check the metadata message.
+
+    Raises InvalidTag if it was changed in transit and MetadataError if it is malformed.
+    """
+    return FileMeta.from_message(decrypt_metadata(recv_bytes(sock), key_schedule(session_key).metadata))
 
 
 def receive_encrypted_file(
     sock: socket.socket,
     meta: FileMeta,
     output_path: str,
-    aes_key: bytes,
+    session_key: bytes,
     on_progress: Optional[ProgressCallback] = None,
 ) -> int:
     """
     Receive and decrypt every chunk into output_path. Returns bytes written.
 
     Raises cryptography.exceptions.InvalidTag if any chunk fails authentication,
-    including when meta.aad does not match the sender's metadata. The partial
-    output file is removed in that case.
+    including when meta.aad does not match the sender's metadata, and
+    MetadataError if the decrypted size differs from meta.total_size. The
+    partial output file is removed in both cases.
     """
+    file_key = key_schedule(session_key).file
     written = 0
     try:
         with open(output_path, "wb") as f:
             for i in range(meta.num_chunks):
                 data = recv_bytes(sock)
                 tag, ciphertext = data[:TAG_SIZE], data[TAG_SIZE:]
-                plaintext = decrypt_chunk(ciphertext, aes_key, derive_chunk_nonce(meta.base_nonce, i), tag, meta.aad)
+                plaintext = decrypt_chunk(ciphertext, file_key, derive_chunk_nonce(meta.base_nonce, i), tag, meta.aad)
                 f.write(plaintext)
                 written += len(plaintext)
                 if on_progress:
                     on_progress(i + 1, meta.num_chunks, written)
+        if written != meta.total_size:
+            raise MetadataError(f"received {written} bytes, metadata promised {meta.total_size}")
     except Exception:
         if os.path.exists(output_path):
             os.remove(output_path)

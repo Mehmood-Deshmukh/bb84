@@ -15,10 +15,17 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 from cryptography.exceptions import InvalidTag
 
-from qkd.core.bb84_protocol import discard_indices, generate_random_bases, privacy_amplification
+from qkd.core.bb84_protocol import (
+    discard_indices,
+    generate_random_bases,
+    generate_random_bits,
+    privacy_amplification,
+)
 from qkd.core.config import ProtocolParams
+from qkd.core.channel_model import ChannelParams, decode_pulses, misalignment_flips
 from qkd.core.quantum_channel import measure_qubits
 from qkd.services.file_stream import receive_encrypted_file, receive_file_meta, received_path
 from qkd.services.reporting import Reporter
@@ -28,10 +35,12 @@ from qkd.usecases.common import (
     AuthContext,
     KeyExchangeResult,
     TransferInterrupted,
+    finite_key_verdict,
     report_qber_verdict,
     report_summary,
 )
 from qkd.usecases.handshake import bob_finished, bob_hello, session_key
+from qkd.usecases.reconcile import bob_reconcile
 from qkd.usecases.resume import BobNegotiation, ResumeOptions, bob_negotiate, bob_send_receipt, wants_resume
 
 
@@ -43,20 +52,39 @@ class ReceiveResult:
     resumed_from_bytes: int = 0  # bytes already on disk from an interrupted session (resume only)
 
 
-def _measure(channel: TranscriptChannel, reporter: Reporter) -> tuple[int, list[int], list[str]]:
+def _measure(
+    channel: TranscriptChannel, link: ChannelParams, reporter: Reporter
+) -> tuple[int, list[int], list[str]]:
+    """
+    Step 1 for Bob: receive the pulses that clicked, measure them, return
+    (pulses sent, bits, bases) with one bit and basis per clicked pulse.
+
+    Bob's detector is emulated here: photons are measured in a random basis and the
+    result is flipped with the misalignment probability; a click from background alone
+    (a null qubit) gives a uniformly random bit.
+    """
     reporter.info("Receiving qubits from quantum channel...")
-    qasm_strings = channel.recv_untracked()
-    reporter.success(f"Received {len(qasm_strings)} qubits")
-    reporter.metrics(raw_qubits=len(qasm_strings))
+    n, _index, qubits = decode_pulses(channel.recv_untracked())
+    m = len(qubits)
+    photons = [i for i, q in enumerate(qubits) if q is not None]
+    reporter.success(f"{m} of {n} pulses clicked ({len(photons)} photons, {m - len(photons)} background)")
+    reporter.metrics(raw_qubits=n, detected=m)
 
     reporter.info("Generating random measurement bases...")
-    bases = generate_random_bases(len(qasm_strings))
+    t_sim = time.perf_counter()
+    bases = generate_random_bases(m)
 
     reporter.info("Measuring qubits (collapsing quantum states)...")
-    t0 = time.time()
-    bits = measure_qubits(qasm_strings, bases)
-    reporter.success(f"Measured {len(bits)} qubits in {time.time() - t0:.2f}s")
-    return len(qasm_strings), bits, bases
+    t0 = time.perf_counter()
+    measured = measure_qubits([qubits[i] for i in photons], [bases[i] for i in photons])
+    flips = misalignment_flips(len(photons), link, np.random.default_rng())
+    bits = generate_random_bits(m)  # background clicks keep these random bits
+    for i, bit, flip in zip(photons, measured, flips):
+        bits[i] = bit ^ int(flip)
+    reporter.success(f"Measured {len(photons)} qubits in {time.perf_counter() - t0:.2f}s")
+    # Time spent in the simulator (QRNG and measurement), kept apart from protocol cost
+    reporter.metrics(sim_ms=round((time.perf_counter() - t_sim) * 1000, 3))
+    return n, bits, bases
 
 
 def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str], reporter: Reporter) -> list[int]:
@@ -70,9 +98,9 @@ def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str
 
     reporter.section("Phase 3: Key Sifting & QBER Estimation")
     sifted = [bits[i] for i in matching]
-    reporter.success(f"Sifted key: {len(sifted)} bits (from {raw} raw qubits)")
-    reporter.info(f"Sift rate: {len(sifted) / raw * 100:.1f}%")
-    reporter.metrics(raw_qubits=raw, sifted_length=len(sifted))
+    reporter.success(f"Sifted key: {len(sifted)} bits (from {len(bits)} detected of {raw} pulses)")
+    reporter.info(f"Sift rate: {len(sifted) / max(1, len(bits)) * 100:.1f}% of detected pulses")
+    reporter.metrics(sifted_length=len(sifted))
     return sifted
 
 
@@ -92,28 +120,38 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     """Bob's side of BB84 up to and including privacy amplification (steps 1 to 4)."""
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
-    raw, bits, bases = _measure(channel, reporter)
+    raw, bits, bases = _measure(channel, params.channel, reporter)
     sifted = _sift(channel, raw, bits, bases, reporter)
     qber, sample_indices = _answer_qber_sample(channel, sifted, reporter)
 
     result = dict(raw_qubits=raw, sifted_length=len(sifted), sample_size=len(sample_indices),
                   qber=qber, threshold=params.qber_threshold)
     if report_qber_verdict(qber, params.qber_threshold, len(sample_indices), reporter):
-        return KeyExchangeResult(key=None, **result)
+        reason = f"QBER {qber:.2%} >= threshold {params.qber_threshold:.0%}"
+        return KeyExchangeResult(key=None, abort_reason=reason, **result)
+
+    # Without reconciliation the kept bits must already match Alice's; any difference
+    # is caught by key confirmation (4b) or the file tag. With "cascade" Bob corrects them.
+    kept = discard_indices(sifted, sample_indices)
+    # Count distinct positions, so a repeated index cannot inflate the sample size
+    sample_size = len(set(sample_indices))
+    leaked = 0
+    if params.reconciliation == "cascade":
+        rec = bob_reconcile(channel, kept, qber, sample_size, reporter)
+        kept, leaked = rec.bits, rec.leaked_bits
+    secure, reason = finite_key_verdict(len(kept), sample_size, qber, params, reporter, leaked)
+    if reason is not None:
+        return KeyExchangeResult(key=None, secure_bits=secure, abort_reason=reason, **result)
 
     reporter.stage("privacy_amplification")
     reporter.section("Phase 4: Key Distillation")
-    # No reconciliation: the channel is noiseless, so the remaining bits already match Alice's.
-    reporter.info("Aligning keys...")
-    remaining = discard_indices(sifted, sample_indices)
-
-    reporter.info("Receiving privacy amplification salt...")
+    reporter.info("Receiving privacy amplification seed...")
     salt = bytes.fromhex(channel.recv_json()["salt"])
-    reporter.info("Privacy amplification (SHA-256 universal hashing)...")
-    _, key = privacy_amplification(remaining, salt=salt)
+    reporter.info(f"Privacy amplification (Toeplitz hashing, {len(kept)} -> {params.final_key_bits} bits)...")
+    _, key = privacy_amplification(kept, params.final_key_bits, salt=salt)
     reporter.success(f"Final key: {len(key) * 8}-bit AES key derived")
     reporter.metrics(key_bits=len(key) * 8)
-    return KeyExchangeResult(key=key, **result)
+    return KeyExchangeResult(key=key, secure_bits=secure, **result)
 
 
 def receive_file(
@@ -127,9 +165,12 @@ def receive_file(
     """
     Authenticate Alice, run the key exchange and, unless it aborts, receive the file into output_dir.
 
-    Raises PeerAuthError if the hello or finished exchange fails; nothing is
-    decrypted or written before Alice's finished signature verifies.
-    Raises cryptography.exceptions.InvalidTag if a chunk fails authentication.
+    Raises PeerAuthError if the hello or finished signature check fails, and
+    KeyConfirmationError if Alice's signature is valid but her key differs from
+    Bob's; nothing is decrypted or written before both checks pass.
+    Raises cryptography.exceptions.InvalidTag if a chunk fails authentication,
+    and file_stream.MetadataError if the metadata is malformed or its chunk
+    count does not match its sizes (checked before any file is created).
 
     With `resume` (and auth sign or hybrid) verified chunks are kept in a .part so a new session can
     continue after them, and a lost connection or failed chunk raises TransferInterrupted instead.
@@ -139,30 +180,30 @@ def receive_file(
     channel = TranscriptChannel(sock, "bob")
     reporter.stage("authentication")
     reporter.section("Phase 0: Authentication (Hello Exchange)")
-    handshake = bob_hello(channel, auth, reporter)
+    handshake = bob_hello(channel, auth, reporter, params)
 
     kx = run_key_exchange(channel, params, reporter)
     if kx.aborted:
         return ReceiveResult(kx)
 
     transcript_hash = channel.digest()
+    key = session_key(kx.key, handshake, transcript_hash)
     negotiate = False
     if handshake.signed:
         reporter.stage("key_confirmation")
-        reporter.section("Key Confirmation (Signed Transcript)")
-        peer_resume = bob_finished(channel, auth, handshake, transcript_hash, reporter, offer_resume)
+        reporter.section("Key Confirmation (Signed Transcript + Key Tag)")
+        peer_resume = bob_finished(channel, auth, handshake, transcript_hash, key, reporter, offer_resume)
         negotiate = offer_resume and peer_resume
         if offer_resume and not peer_resume:
             reporter.warning("The sender does not offer resume. Receiving the whole file without it.")
 
-    key = session_key(kx.key, handshake, transcript_hash)
     if negotiate:
         return _receive_resumable(sock, channel, key, transcript_hash, handshake, kx, output_dir, reporter, resume)
 
     reporter.stage("file_transfer")
     reporter.section("Phase 5: Secure File Reception (Chunked Streaming)")
     reporter.info("Receiving encrypted file metadata...")
-    meta = receive_file_meta(sock)
+    meta = receive_file_meta(sock, key)
     reporter.info(f"File: {meta.filename} ({meta.total_size} bytes, {meta.num_chunks} chunks of {meta.chunk_size // 1024} KB)")
 
     os.makedirs(output_dir, exist_ok=True)
@@ -205,7 +246,7 @@ def _receive_resumable(
         reporter.stage("file_transfer")
         reporter.section("Phase 5: Secure File Reception (Chunked Streaming)")
         reporter.info("Receiving encrypted file metadata...")
-        meta = receive_file_meta(sock)
+        meta = receive_file_meta(sock, key)
         validate_meta(meta)
         if meta.resume_offset != negotiation.offset:
             raise ResumeError("the file metadata does not carry the granted resume offset")

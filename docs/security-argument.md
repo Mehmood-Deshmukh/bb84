@@ -121,8 +121,17 @@ its place:
 - **`finished` is excluded** from `T` because it *is* the signature over `T`; a value
   cannot sign itself. The two `finished` messages are sent untracked (`alice_finished`,
   `bob_finished`).
+- **Both hellos carry the security policy** (`params`: final key length,
+  `eps_sec`, `eps_cor`, QBER threshold, finite-key enforcement;
+  `ProtocolParams.security_policy` in `src/qkd/core/config.py`). Each side compares
+  the peer's policy with its own and aborts on any difference, like a mode
+  mismatch, and since the hellos are tracked the policy is also bound into `T`.
+  Neither side can be talked into a weaker key length or error tolerance.
+  `test_parameter_mismatch_aborts_both_sides` (`tests/usecases/test_handshake.py`).
 - **Role labels** distinguish the two signatures. Bob signs
-  `b"qkd-finished-v1|bob|" + T` and Alice signs `b"qkd-finished-v1|alice|" + T`
+  `b"qkd-finished-v1|bob|" + T + tag_B` and Alice signs
+  `b"qkd-finished-v1|alice|" + T + tag_A`, where the tags are the key confirmation
+  tags of §5a
   (`FINISHED_PREFIX` and the `b"bob"`/`b"alice"` role in `_finished`). The label stops
   one side's signature from being accepted as the other's: Alice verifies Bob's
   message against the `bob` label and Bob verifies Alice's against the `alice` label
@@ -138,10 +147,11 @@ the other before doing anything that depends on the peer.
 On Alice's side (`send_file`, `src/qkd/usecases/send_file.py`): she runs
 `alice_hello`, then the BB84 `run_key_exchange` (which ends by sending the salt), then
 computes `T`, then — in sign/hybrid — calls `alice_finished`. `alice_finished`
-**receives and verifies Bob's signature first**, and only then sends her own. She
-derives the session key and calls `send_encrypted_file` *after* `alice_finished`
-returns. So if Bob's signature does not verify, she raises before computing the key or
-sending a single ciphertext byte.
+**receives and verifies Bob's signature and key tag first**, and only then sends her
+own. She derives the session key just before 4b, because the key tag of §5a needs it,
+but uses it for nothing else until `alice_finished` returns; only then does she call
+`send_encrypted_file`. So if Bob's finished does not verify, she raises before sending
+a single ciphertext byte.
 
 On Bob's side (`receive_file`, `src/qkd/usecases/receive_file.py`): he runs
 `bob_hello`, then `run_key_exchange` (which receives the salt), then computes `T`,
@@ -153,6 +163,46 @@ reading the metadata, creating the output directory, or opening any file.
 Because the signature covers `T`, which already contains the hellos and every tracked
 BB84 message, one signature at the end authenticates the whole conversation
 retroactively; there is no need to sign each message as it goes.
+
+## 5a. Key confirmation: the signature is not enough
+
+The signatures over `T` prove *who* is talking and that both sides saw the same
+classical messages. They do not prove that both sides hold the same *key*. The
+qubits are not in `T`, so an eavesdropper who disturbs only a few qubits can pass
+the QBER sample and still leave Alice's and Bob's kept bits different. On a
+noiseless channel there is no reconciliation step to repair that, so the two QKD
+keys, and therefore the two session keys, differ. Before this change the
+difference surfaced only as an AES-GCM failure on the first chunk.
+
+Each `finished` now carries a tag
+
+```
+confirm_R = HMAC-SHA256(key_schedule(K).confirm, "qkd-confirm-v1|" || R || "|" || T)
+```
+
+for role `R`, and the signature covers `T` and the tag together
+(`confirmation_tag`, `finished_message`, `_verify_finished` in `handshake.py`).
+The receiver checks the signature first (`PeerAuthError` if it fails: wrong
+identity or changed transcript), then the tag (`KeyConfirmationError` if it fails:
+right peer, different key). The runners report a `KeyConfirmationError` as
+`aborted_qber`, because it is evidence of channel disturbance, not of an
+impostor. The confirmation key is a separate HKDF-Expand output of `K`, so the
+tag reveals nothing useful about the file key.
+
+Evidence: `test_key_mismatch_is_caught_by_key_confirmation`
+(`tests/invariants/test_finite_key_gate.py`) flips every qubit in transit with the
+QBER and finite-key checks disabled; Bob's signature verifies, his tag does not,
+and Alice stops at `key_confirmation` with no file data sent.
+`test_different_keys_fail_key_confirmation_not_authentication` and
+`test_signature_covers_the_confirmation_tag` (`tests/usecases/test_handshake.py`)
+check the two failure kinds separately.
+
+A side effect worth stating: in hybrid mode, a relay that has *stolen Bob's
+signing key* and forwards the real hellos still fails, because the KEM ciphertext
+it relayed is Bob's and it cannot compute `K`
+(`test_hybrid_relay_with_bobs_key_still_fails_key_confirmation`). In sign mode the
+same relay succeeds (`test_relay_control_with_bobs_key_passes_key_confirmation`),
+as it must: there the signing key is the only secret.
 
 ## 6. Tampering
 
@@ -180,14 +230,26 @@ the transfer completes and the file is byte-identical — proving the proxy and 
 disabled threshold do not themselves break anything, so the six failures are caused by
 the tampering alone.
 
-The file metadata is a special case because it is sent at step 5, *after* 4b, so it is
-not in `T`. Instead it is bound as AES-GCM additional authenticated data: the sender
-computes `metadata_aad(msg)` (SHA-256 of the canonical JSON of the metadata message,
-`src/qkd/services/file_stream.py`) and passes it as AAD to every chunk; the receiver
-recomputes the AAD from the *raw metadata message it received* and uses it to decrypt.
-If the metadata was altered in flight, the AAD differs and chunk 0 fails its GCM tag.
-`test_metadata_tamper_caught_by_aad` changes the filename and asserts Bob raises
-`InvalidTag`, that no chunk was reported written, and that the partial file is removed.
+The file metadata is a special case because it is sent at step 5, *after* 4b, so it
+is not in `T`. It is sent as one AES-GCM message under its own subkey
+(`key_schedule(K).metadata`, fixed zero nonce, which is safe because that subkey
+encrypts exactly one message; `encrypt_metadata` in
+`src/qkd/services/file_stream.py`). A changed metadata message fails its own tag
+before Bob creates the output directory (`test_metadata_tamper_caught_by_aad`), and
+a passive observer no longer learns the filename or exact size
+(`test_metadata_is_not_sent_in_clear`). The chunks still carry SHA-256 of the
+canonical metadata JSON as AAD, which ties the chunk stream to that metadata.
+
+**A gap that existed before this change.** The receive loop runs `num_chunks`
+times, and metadata used to travel in the clear. A relay that set `num_chunks` to
+0 made Bob skip every tag check and write an empty file under any name it chose.
+Two rules close this independently of the encryption: an empty file is sent as
+one chunk of empty plaintext, so there is always at least one tag to check, and
+Bob rejects metadata whose `num_chunks` is not `max(1, ceil(total_size /
+chunk_size))` (`MetadataError`, `FileMeta.from_message`). Bob also checks that the
+decrypted byte count equals `total_size`. `test_zero_chunk_metadata_is_rejected`
+encrypts zero-chunk metadata under the *correct* key, so the count rule is tested
+on its own.
 
 ## 7. Impersonation results
 
@@ -291,6 +353,62 @@ Two more details:
   (`test_none_mode_session_key_is_legacy_key`,
   `test_none_mode_equals_derive_aes_key`).
 
+### 9a. How many secret bits does `K_QKD` really have?
+
+The argument above assumes `K_QKD` is a uniform 256-bit secret. With the old
+default of 128 qubits it was not: about 64 bits survive sifting, about 9 are
+revealed for the QBER sample, and SHA-256 stretched the remaining ~55 bits to 256.
+At most ~55 bits of secrecy went in, so `sign` mode (which has no KEM) had at most
+~55-bit security, and the hybrid "either input" claim held only through the KEM.
+
+Two changes make the QKD half provable:
+
+- **Finite-key bound.** `src/qkd/core/finite_key.py` computes the secure length
+  `l = n (1 - h(Q + mu)) - leak_EC - log2(2 / (eps_sec^2 eps_cor))` of Tomamichel,
+  Lim, Gisin, and Renner (Nat. Commun. 3, 634, 2012), where `n` is the kept bits,
+  `k` the sample size, `Q` the sample error rate and `mu` the statistical deviation
+  term. There is no error correction, so `leak_EC` is just the `log2(2 / eps_cor)`
+  bits of the key confirmation check of §5a. Both peers compute `l` from public
+  values and abort (no message needed) if `l < final_key_bits`
+  (`finite_key_verdict` in `src/qkd/usecases/common.py`). The default N is now 8192
+  raw qubits, the smallest power of two that gives at least 256 secure bits with
+  `eps_sec = 1e-10`, `eps_cor = 1e-15` (about 680 on a clean channel). At 128 qubits
+  `l = 0` (`test_old_default_of_128_qubits_has_no_secure_bits`,
+  `test_too_few_qubits_abort_on_both_sides`).
+- **Two-universal hashing.** Privacy amplification now multiplies the kept bits by
+  a random binary Toeplitz matrix seeded by `n + m - 1` fresh bits from the OS
+  CSPRNG, sent in the `salt` message (`toeplitz_hash`,
+  `src/qkd/core/bb84_protocol.py`). Toeplitz matrices form a two-universal family,
+  which is what the leftover hash lemma behind the bound requires; SHA-256 is not.
+  `test_toeplitz_hash_matches_matrix_definition` checks the fast convolution form
+  against the matrix definition.
+
+The fixed 11% QBER threshold stays as an early alarm on the point estimate. The
+finite-key bound is the actual security gate: at these sample sizes `mu` is about
+0.2, so the asymptotic 11% figure alone says nothing about a finite run.
+
+The sample positions and the Toeplitz seed come from `secrets` (the OS CSPRNG).
+They previously came from Python's `random` module (Mersenne Twister), whose
+future output can be predicted from enough past output
+(`test_sampling_and_salt_ignore_the_random_module_seed`).
+
+### 9b. Key schedule
+
+`K` is never used directly. `key_schedule(K)` (`src/qkd/core/crypto_utils.py`)
+expands it with HKDF-Expand into three independent 256-bit subkeys: `file` for the
+chunks, `metadata` for the metadata message, and `confirm` for the tags. No key is
+used by two primitives, and the metadata and chunk encryptions cannot share a
+(key, nonce) pair.
+
+### 9c. A caveat on the combiner argument
+
+`T` is used as the HKDF salt and contains `kem_ct`, which is correlated with
+`ss_KEM`. The standard-model extractor guarantee of HKDF assumes a salt
+independent of the input keying material, so the "either input secret" argument
+above should be read in the random-oracle model, or backed by the dual-PRF
+analysis of HMAC. Binding both `kem_pk` and `kem_ct` into `T` is still the right
+choice: the ML-KEM shared secret is not itself bound to the ciphertext.
+
 ## 10. Eve is still caught by QBER
 
 Adding authentication does not weaken BB84's own defence against a quantum-channel
@@ -314,12 +432,31 @@ classical channel; QBER still stops interference with the quantum channel.
 - **TOFU first contact.** With trust-on-first-use, a man-in-the-middle present at the
   very first contact can have their key pinned. Out-of-band pinning avoids this; TOFU
   only protects contacts after the first.
-- **Qubits share the TCP connection.** The "quantum" channel is a stream of QASM
-  circuits over the same TCP socket (a simulation artefact). On real hardware the
-  quantum and classical channels would be separate.
+- **Qubits share the TCP connection, and the simulated qubit is a classical
+  description.** The "quantum" channel is a stream of QASM circuits over the same TCP
+  socket (a simulation artefact). Anyone who reads that stream sees the gates and
+  so learns Alice's bits and bases without disturbing anything. The security claims
+  therefore assume an adversary who acts on the quantum channel only by preparing
+  and measuring qubits (as `eve_intercept_resend` does); physics does not enforce
+  this in the simulation. On real hardware the quantum and classical channels would
+  be separate.
+- **Node mode takes the pinned key from mDNS.** In node mode the fingerprint that is
+  pinned is the one the peer advertises over mDNS, which any host on the LAN can
+  spoof. Node mode is therefore no stronger than trust-on-first-use against an
+  attacker present at discovery, and the node REST API is unauthenticated. The
+  strong claims in this document hold for CLI runs with `--peer-fingerprint` or a
+  verified trust store entry.
+- **QBER and finite-key aborts are unauthenticated.** They happen before 4b, so an
+  in-path attacker can trigger an "eavesdropper detected" abort by changing a
+  classical message. That is denial of service (out of scope), but it means an abort
+  alone does not prove a quantum-channel attack.
+- **Identities travel in the clear.** `id_pk` is sent unencrypted in both hellos, so a
+  passive observer learns which identities talk to each other.
 - **Noiseless channel, no reconciliation.** The simulated channel has no noise, so
-  there is no information reconciliation step; any non-zero QBER is attributed to an
-  eavesdropper.
+  there is no information reconciliation step; any disagreement in the kept bits is
+  caught by key confirmation (§5a) and the run aborts. On a noisy channel every run
+  would abort until reconciliation is added (and its leakage charged in the finite-key
+  bound).
 - **Trust is pinned per peer; there is no PKI.** Keys are pinned or accepted under
   TOFU per peer, with no certificate authority or revocation.
 - **Error surfaced to the rejecting peer's partner.** When one side rejects the other
@@ -349,8 +486,17 @@ classical channel; QBER still stops interference with the quantum channel.
 | Key combiner matches spec | `test_session_key.py::test_known_answer_hkdf`, `::test_known_answer_hkdf_sign` | Independent HKDF reproduces hybrid and sign keys |
 | `none` equals the legacy key | `test_session_key.py::test_none_mode_equals_derive_aes_key` | `none` returns `derive_aes_key(qkd_key)` |
 | Fingerprint format pinned | `test_pqc.py::test_fingerprint_known_answer` | Fixed 1952-byte key maps to a fixed fingerprint |
+| Key mismatch caught before file data | `test_finite_key_gate.py::test_key_mismatch_is_caught_by_key_confirmation` | Valid signature, wrong tag: `KeyConfirmationError` at `key_confirmation` |
+| Signature covers the tag | `test_handshake.py::test_signature_covers_the_confirmation_tag` | A swapped tag under a real signature fails the signature |
+| Stolen signing key, hybrid relay | `test_mitm.py::test_hybrid_relay_with_bobs_key_still_fails_key_confirmation` | Relay lacks the KEM secret; stops at key confirmation |
+| Too few qubits abort | `test_finite_key_gate.py::test_too_few_qubits_abort_on_both_sides` | 128 qubits: both sides abort on the finite-key bound |
+| Default N gives a provable key | `test_finite_key_gate.py::test_default_qubits_pass_the_bound_with_matching_keys` | Bound >= 256 bits; keys match |
+| Toeplitz hash is correct | `test_key_derivation.py::test_toeplitz_hash_matches_matrix_definition` | Convolution form equals the matrix definition |
+| Policy mismatch rejected | `test_handshake.py::test_parameter_mismatch_aborts_both_sides` | Any difference in eps, key length, threshold, or enforcement aborts both |
+| Metadata encrypted | `test_file_transfer.py::test_metadata_is_not_sent_in_clear` | Filename and size fields absent from the wire |
+| Zero-chunk metadata rejected | `test_file_transfer.py::test_zero_chunk_metadata_is_rejected` | `MetadataError`; no file written |
 
-The full test suite is **350 tests** (`pytest -q`), of which `tests/invariants/`
+The full test suite is **557 tests** (`pytest -q`), of which `tests/invariants/`
 exercises the handshake, MITM, and tamper behaviours above against the real Aer
 simulator.
 
@@ -369,7 +515,13 @@ What can be stated from the code are the per-message sizes that drive the overhe
 | KEM public key `kem_pk` (ML-KEM-768) | 1184 bytes | Alice's hello (hybrid) |
 | KEM ciphertext `kem_ct` (ML-KEM-768) | 1088 bytes | Bob's hello (hybrid) |
 | Signature (ML-DSA-65) | 3309 bytes | each `finished` (sign, hybrid) |
+| Key confirmation tag (HMAC-SHA256) | 32 bytes | each `finished` (sign, hybrid) |
 | Nonce | 32 bytes | hello (sign, hybrid) |
+| Security policy `params` | about 120 bytes of JSON | every hello (all modes) |
+
+The Toeplitz seed in the `salt` message is `n + m - 1` bits (about 470 bytes at the
+default N, sent as hex). It is part of the key exchange in every mode, not of the
+authentication overhead.
 
 Binary fields travel base64-encoded inside JSON, so on-wire sizes are about 4/3 of the
 raw sizes plus JSON framing. `auth_overhead_bytes` (reported by the handshake,

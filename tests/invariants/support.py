@@ -37,8 +37,10 @@ WIRE_STEPS: list[tuple[str, str]] = [
     ("4-salt", A2B),
     ("4b-bob", B2A),           # Bob's finished signature (sign/hybrid)
     ("4b-alice", A2B),         # Alice's finished signature (sign/hybrid)
-    ("5-meta", A2B),           # file metadata
+    ("5-meta", A2B),           # file metadata (AES-GCM ciphertext, not JSON)
 ]
+# Steps whose payload is raw bytes; a tamper function for these gets and returns bytes.
+BINARY_STEPS = {"5-meta"}
 
 
 # The same steps when both sides run with resume on (sign/hybrid): the sealed request and grant
@@ -92,7 +94,11 @@ def proxy(
         src, dst = ends(direction)
         if step_id == tamper_step:
             assert tamper is not None
-            wire.send_bytes(dst, wire.encode_json(tamper(wire.decode_json(wire.recv_bytes(src)))))
+            raw = wire.recv_bytes(src)
+            if step_id in BINARY_STEPS:
+                wire.send_bytes(dst, tamper(raw))
+            else:
+                wire.send_bytes(dst, wire.encode_json(tamper(wire.decode_json(raw))))
         else:
             wire.forward_message(src, dst)
 
@@ -121,7 +127,8 @@ def proxy(
 
 # ── trust, reporting, and context ────────────────────────────────────────────
 AUTH_METRICS = {"auth_mode", "peer_fingerprint", "peer_trust", "handshake_ms", "auth_overhead_bytes"}
-BB84_METRICS = {"raw_qubits", "sifted_length", "sample_size", "qber", "qber_threshold", "key_bits"}
+BB84_METRICS = {"raw_qubits", "sifted_length", "sample_size", "qber", "qber_threshold", "secure_key_bits", "key_bits",
+                "sim_ms", "qubit_bytes", "channel_bytes", "file_wire_bytes", "detected"}
 SIGNED_STAGES = [
     "authentication",
     "quantum_transmission",

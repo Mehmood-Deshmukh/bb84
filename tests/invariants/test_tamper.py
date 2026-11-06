@@ -9,7 +9,7 @@ is hashed by one side as sent and the other as received, so their transcripts T
 differ, and Bob's signature over his T fails to verify against Alice's T.)
 
 The metadata tamper uses the normal threshold: the handshake succeeds and the change
-to the file metadata is caught by the per-chunk GCM AAD instead.
+to the (encrypted) file metadata is caught by its own GCM tag instead.
 
 Each tamper asserts it actually changed the message, so a no-op tamper fails loudly
 rather than passing silently. Runs use the Qiskit Aer simulator with 64 qubits.
@@ -32,8 +32,11 @@ from tests.invariants.support import RecordingReporter, context, guarded, keys, 
 
 # Threshold above 1.0 disables the QBER abort; fraction 0.5 keeps the sample large
 # enough that the index-swap tampers always have two elements to swap.
-TAMPER_PARAMS = ProtocolParams(num_qubits=64, qber_sample_fraction=0.5, qber_threshold=1.01)
-META_PARAMS = ProtocolParams(num_qubits=64)  # normal threshold; metadata AAD is the detector
+# These runs test authentication and tamper mechanics, not key length, so they use a
+# small N with the finite-key gate off. tests/invariants/test_finite_key_gate.py and the
+# honest-transfer tests exercise the gate at the default N.
+TAMPER_PARAMS = ProtocolParams(num_qubits=64, qber_sample_fraction=0.5, qber_threshold=1.01, enforce_finite_key=False)
+META_PARAMS = ProtocolParams(num_qubits=64, enforce_finite_key=False)  # metadata decryption is the detector
 
 
 def _changed(new: Any, old: Any) -> Any:
@@ -117,13 +120,14 @@ def test_classical_tamper_caught_by_signature(step, tamper, keys, parallel, make
 def test_metadata_tamper_caught_by_aad(keys, parallel, make_file, tmp_path: Path) -> None:
     src = make_file("payload.bin", 1000)  # one chunk
     out_dir = tmp_path / "received"
-    tamper = lambda msg: _changed({**msg, "filename": "evil_" + msg["filename"]}, msg)  # noqa: E731
+    # The metadata is ciphertext now; flip one bit of it
+    tamper = lambda raw: _changed(raw[:-1] + bytes([raw[-1] ^ 1]), raw)  # noqa: E731
     _, bob_res, _, bob_rep = _run(
         parallel, src, out_dir, keys, META_PARAMS, tamper_step="5-meta", tamper=tamper, stop_after=None
     )
     assert isinstance(bob_res, InvalidTag)
-    assert bob_rep.chunks_reported() == 0  # failed on chunk 0, before any chunk was written
-    assert out_dir.exists() and list(out_dir.iterdir()) == []  # partial file deleted
+    assert bob_rep.chunks_reported() == 0  # failed on the metadata, before any chunk was written
+    assert not out_dir.exists()  # rejected before the output directory was even created
 
 
 def test_untampered_proxy_run_succeeds(keys, parallel, make_file, same_file, tmp_path: Path) -> None:

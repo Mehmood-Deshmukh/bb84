@@ -66,7 +66,7 @@ def run_pair(keys, alice_step: Callable[[Session], Any], bob_step: Callable[[Ses
         state = alice_hello(ch, alice_auth, NullReporter())
         ch.send_json({"salt": salt})
         T = ch.digest()
-        peer = alice_finished(ch, alice_auth, state, T, NullReporter(), alice_offers)
+        peer = alice_finished(ch, alice_auth, state, T, session_key(QKD_KEY, state, T), NullReporter(), alice_offers)
         return alice_step(Session(ch, state, alice_auth, peer, b"a"))
 
     def bob(sock: socket.socket):
@@ -74,7 +74,7 @@ def run_pair(keys, alice_step: Callable[[Session], Any], bob_step: Callable[[Ses
         state = bob_hello(ch, bob_auth, NullReporter())
         ch.recv_json()
         T = ch.digest()
-        peer = bob_finished(ch, bob_auth, state, T, NullReporter(), bob_offers)
+        peer = bob_finished(ch, bob_auth, state, T, session_key(QKD_KEY, state, T), NullReporter(), bob_offers)
         return bob_step(Session(ch, state, bob_auth, peer, b"b"))
 
     def guard(fn, sock):

@@ -20,7 +20,7 @@ import pytest
 from qkd.core import pqc
 from qkd.core.config import ProtocolParams
 from qkd.services.resume import ResumeStore
-from qkd.usecases.common import AuthContext, PeerAuthError, TransferInterrupted
+from qkd.usecases.common import AuthContext, KeyConfirmationError, PeerAuthError, TransferInterrupted
 from qkd.usecases.eavesdrop_demo import run_eavesdrop
 from qkd.usecases.mitm_demo import AcceptAnyVerifier, run_mitm
 from qkd.usecases.receive_file import receive_file
@@ -42,7 +42,7 @@ from tests.invariants.support import (
 CHUNK = 1000
 SIZE = 11 * CHUNK + 321  # 12 chunks, the last one short
 CHUNKS = 12
-PARAMS = ProtocolParams(num_qubits=64, chunk_size=CHUNK)
+PARAMS = ProtocolParams(num_qubits=64, chunk_size=CHUNK, enforce_finite_key=False)
 TID = "xfer1"
 OPTS = ResumeOptions(TID)
 
@@ -241,19 +241,30 @@ def test_tampered_resume_grant_aborts_before_any_file_data(keys, parallel, src: 
     assert not final_file(out).exists() and state_files(out) == []
 
 
-def test_tampered_metadata_fails_on_the_first_chunk_and_keeps_nothing(keys, parallel, src: Path, out: Path) -> None:
-    run = transfer(keys, parallel, src, out, tamper_step="5-meta", tamper=lambda m: {**m, "filename": "other.bin"})
+def test_tampered_metadata_fails_to_decrypt_and_keeps_nothing(keys, parallel, src: Path, out: Path) -> None:
+    """The metadata is AES-GCM ciphertext now, so a changed byte fails its tag before any chunk is read."""
+    run = transfer(keys, parallel, src, out, tamper_step="5-meta", tamper=lambda raw: raw[:20] + bytes([raw[20] ^ 1]) + raw[21:])
     assert isinstance(run.bob, Exception)
     assert not final_file(out).exists() and not (out / "received_other.bin").exists()
     part = out / ".resume" / f"{TID}.part"
     assert not part.exists() or part.stat().st_size == 0
 
 
-def test_metadata_with_a_forged_resume_offset_is_refused(keys, parallel, src: Path, out: Path) -> None:
+def test_metadata_with_a_forged_resume_offset_is_refused(keys, parallel, src: Path, out: Path, monkeypatch) -> None:
+    """An authenticated sender that streams from another chunk than the one granted is refused."""
+    from dataclasses import replace
+
+    import qkd.usecases.send_file as send_module
+
     interrupt_after(keys, parallel, src, out, 5)
     before = (out / ".resume" / f"{TID}.part").read_bytes()
-    run = transfer(keys, parallel, src, out, tamper_step="5-meta", tamper=lambda m: {**m, "resume_offset": 2},
-                   chunks=CHUNKS - 5)
+    real = send_module.send_encrypted_file
+
+    def forged(sock, path, key, meta, on_progress=None, start_chunk=0):
+        return real(sock, path, key, replace(meta, resume_offset=2), on_progress, start_chunk=2)
+
+    monkeypatch.setattr(send_module, "send_encrypted_file", forged)
+    run = transfer(keys, parallel, src, out, chunks=CHUNKS - 2)
     assert isinstance(run.bob, Exception) and not isinstance(run.bob, TransferInterrupted)
     assert "offset" in str(run.bob)
     assert (out / ".resume" / f"{TID}.part").read_bytes() == before, "the verified prefix survives a forged offset"
@@ -391,7 +402,7 @@ def test_resume_is_ignored_without_authentication(keys, parallel, src: Path, out
 
 # ── Eve and Mallory with resume on ─────────────────────────────
 
-EVE_PARAMS = ProtocolParams(num_qubits=64, chunk_size=CHUNK, qber_sample_fraction=1.0, qber_threshold=0.01)
+EVE_PARAMS = ProtocolParams(num_qubits=64, chunk_size=CHUNK, qber_sample_fraction=1.0, qber_threshold=0.01, enforce_finite_key=False)
 
 
 def test_eve_still_ends_in_a_qber_abort_with_resume_on(keys, parallel, src: Path, out: Path) -> None:
@@ -420,9 +431,9 @@ def eve_then_close(eve_a: socket.socket, eve_b: socket.socket, params: ProtocolP
                 pass
 
 
-def test_eve_forwards_the_resume_negotiation(keys, parallel, src: Path, out: Path) -> None:
-    """With a threshold that never trips, Eve's forwarding runs on: the sealed request reaches Alice."""
-    lenient = ProtocolParams(num_qubits=64, chunk_size=CHUNK, qber_threshold=1.01)
+def test_eve_is_caught_by_key_confirmation_before_the_resume_negotiation(keys, parallel, src: Path, out: Path) -> None:
+    """With a threshold that never trips, Eve's relay runs on, but her measurements made the keys differ."""
+    lenient = ProtocolParams(num_qubits=64, chunk_size=CHUNK, qber_threshold=1.01, enforce_finite_key=False)
     alice_rep, bob_rep = Reporter(), Reporter()
     alice_end, eve_a = socket.socketpair()
     eve_b, bob_end = socket.socketpair()
@@ -433,9 +444,9 @@ def test_eve_forwards_the_resume_negotiation(keys, parallel, src: Path, out: Pat
             lambda: eve_then_close(eve_a, eve_b, lenient),
         )
     assert alice is not None and bob is not None
-    # Eve's measurements made the keys differ, so Alice cannot open Bob's sealed request: it did arrive.
-    assert isinstance(alice, PeerAuthError) and "resume request failed authentication" in alice.reason
-    assert not final_file(out).exists()
+    assert isinstance(alice, KeyConfirmationError) and isinstance(bob, Exception), (alice, bob)  # Bob sees the close
+    assert alice_rep.stages[-1] == "key_confirmation"
+    assert not final_file(out).exists() and state_files(out) == []
 
 
 def test_mallory_relaying_the_hellos_is_still_caught_at_key_confirmation(keys, parallel, src: Path, out: Path) -> None:

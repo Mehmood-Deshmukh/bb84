@@ -63,6 +63,7 @@ export const STAGE_LABEL = {
   quantum_transmission: 'Send qubits',
   sifting: 'Sift bases',
   qber_estimation: 'Estimate QBER',
+  reconciliation: 'Correct errors',
   privacy_amplification: 'Amplify privacy',
   key_confirmation: 'Confirm key',
   file_transfer: 'Stream file',

@@ -8,8 +8,10 @@ QKD_<NAME>, for example QKD_NUM_QUBITS=256. Values are read once, at import.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, TypeVar
+
+from qkd.core.channel_model import PRESETS, ChannelParams, preset
 
 T = TypeVar("T")
 
@@ -42,14 +44,22 @@ NODE_HOST = _env("NODE_HOST", "", str)  # address advertised to peers ("" = auto
 # ─────────────────────────────────────────────
 # Quantum Parameters
 # ─────────────────────────────────────────────
-NUM_QUBITS = _env("NUM_QUBITS", 128, int)                       # Total raw qubits sent per round
+# 8192 raw qubits is the smallest power of two for which the finite-key bound
+# (see core/finite_key.py) gives at least 256 secure bits with the defaults below.
+NUM_QUBITS = _env("NUM_QUBITS", 8192, int)                      # Total raw qubits sent per round
 QBER_SAMPLE_FRACTION = _env("QBER_SAMPLE_FRACTION", 0.15, float)  # Fraction of sifted bits sacrificed for QBER estimation
-QBER_THRESHOLD = _env("QBER_THRESHOLD", 0.11, float)            # Max tolerable QBER (11%), theoretical BB84 limit
+QBER_THRESHOLD = _env("QBER_THRESHOLD", 0.11, float)            # Early abort on the point estimate (asymptotic BB84 limit)
 
 # ─────────────────────────────────────────────
 # Privacy Amplification
 # ─────────────────────────────────────────────
 FINAL_KEY_BITS = _env("FINAL_KEY_BITS", 256, int)  # AES-256 key length
+
+# Finite-key security parameters (Tomamichel et al. 2012). EPS_SEC bounds the
+# distance of the final key from a perfectly secret one; EPS_COR bounds the
+# probability that Alice's and Bob's keys differ without being noticed.
+EPS_SEC = _env("EPS_SEC", 1e-10, float)
+EPS_COR = _env("EPS_COR", 1e-15, float)
 
 # ─────────────────────────────────────────────
 # File Transfer
@@ -81,6 +91,50 @@ def _cast_tofu(raw: str) -> int:
     return int(raw)
 
 
+# Abort when the finite-key bound gives fewer than FINAL_KEY_BITS secure bits.
+# Only tests and experiments that study something else (tampering, timing at
+# small sizes) should turn this off; the key is then NOT provably secure.
+ENFORCE_FINITE_KEY = bool(_env("ENFORCE_FINITE_KEY", 1, _cast_tofu))
+
+# ─────────────────────────────────────────────
+# Quantum channel (core/channel_model.py)
+# ─────────────────────────────────────────────
+# A named parameter set at a fibre length; any single value can be overridden.
+# The default "ideal" channel loses nothing and adds no errors (the original protocol).
+CHANNEL_PRESET = _env("CHANNEL_PRESET", "ideal", str)
+CHANNEL_LENGTH_KM = _env("CHANNEL_LENGTH_KM", 0.0, float)
+FIBER_LOSS_DB_PER_KM = _env("FIBER_LOSS_DB_PER_KM", None, float)  # alpha
+DETECTOR_EFFICIENCY = _env("DETECTOR_EFFICIENCY", None, float)  # eta_Bob
+DARK_COUNT_PROB = _env("DARK_COUNT_PROB", None, float)  # Y0, per pulse
+MISALIGNMENT = _env("MISALIGNMENT", None, float)  # e_d
+
+
+def _channel() -> ChannelParams:
+    if CHANNEL_PRESET not in PRESETS:
+        raise ValueError(f"Invalid value for QKD_CHANNEL_PRESET: {CHANNEL_PRESET!r}. Known: {', '.join(PRESETS)}")
+    overrides = {name: value for name, value in (
+        ("loss_db_per_km", FIBER_LOSS_DB_PER_KM),
+        ("detector_efficiency", DETECTOR_EFFICIENCY),
+        ("dark_count_prob", DARK_COUNT_PROB),
+        ("misalignment", MISALIGNMENT),
+    ) if value is not None}
+    return replace(preset(CHANNEL_PRESET, CHANNEL_LENGTH_KM), **overrides)
+
+
+CHANNEL = _channel()
+
+
+def _validate_reconciliation(raw: str) -> str:
+    val = raw.strip().lower()
+    if val not in {"none", "cascade"}:
+        raise ValueError(f"Invalid reconciliation: {raw!r}. Allowed: none, cascade")
+    return val
+
+
+# Error correction between QBER estimation and privacy amplification (core/cascade.py).
+# "none" keeps the original protocol, where any error aborts at key confirmation.
+RECONCILIATION = _env("RECONCILIATION", "none", _validate_reconciliation)
+
 AUTH_MODE = _env("AUTH_MODE", "hybrid", _validate_auth_mode)
 IDENTITY_DIR = _env("IDENTITY_DIR", "identity", str)
 KNOWN_PEERS_FILE = _env("KNOWN_PEERS_FILE", "known_peers.json", str)
@@ -102,3 +156,25 @@ class ProtocolParams:
     qber_sample_fraction: float = QBER_SAMPLE_FRACTION
     qber_threshold: float = QBER_THRESHOLD
     chunk_size: int = CHUNK_SIZE
+    final_key_bits: int = FINAL_KEY_BITS
+    eps_sec: float = EPS_SEC
+    eps_cor: float = EPS_COR
+    enforce_finite_key: bool = ENFORCE_FINITE_KEY
+    # Physics, not policy: not negotiated in the hello. Alice's side applies loss and
+    # background clicks, Bob's side the misalignment error (see channel_model.py).
+    channel: ChannelParams = CHANNEL
+    reconciliation: str = RECONCILIATION
+
+    def security_policy(self) -> dict:
+        """
+        The values both peers must agree on. Sent in the hello (so they are bound
+        into the transcript) and compared on arrival; a mismatch aborts.
+        """
+        return {
+            "final_key_bits": self.final_key_bits,
+            "eps_sec": self.eps_sec,
+            "eps_cor": self.eps_cor,
+            "qber_threshold": self.qber_threshold,
+            "enforce_finite_key": self.enforce_finite_key,
+            "reconciliation": self.reconciliation,
+        }

@@ -78,6 +78,7 @@ def start_pair(src: Path, work: Path, out: Path) -> tuple[Runner, Runner]:
     env = {
         **os.environ,
         "QKD_NUM_QUBITS": "64",
+        "QKD_ENFORCE_FINITE_KEY": "false",  # 64 qubits cannot reach the finite-key length
         "QKD_AUTH_MODE": "hybrid",
         "QKD_CHUNK_SIZE": str(CHUNK),
         "QKD_RESUME_SYNC_CHUNKS": "1",  # an fsync per chunk keeps Bob slow enough to be killed mid-stream

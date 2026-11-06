@@ -1,0 +1,16 @@
+# E1: how often the QBER check catches a partial intercept-resend Eve.
+# Eve attacks a fraction f of the qubits, so about f/4 of the sifted bits are wrong.
+# The check aborts when the sampled error rate reaches QKD_QBER_THRESHOLD (11%), so the
+# expected detection rate is P[Binomial(k, f/4) >= 0.11 k] for a sample of k bits.
+# The finite-key gate is off so that every run reaches the QBER check at small N too;
+# rate_qber_check is the measured detection rate.
+name: e1_detection
+description: QBER-check detection rate vs raw qubits and Eve's intercept fraction
+repeats: 30
+fixed:
+  mode: none
+  payload_bytes: 1000
+  QKD_ENFORCE_FINITE_KEY: 0
+grid:
+  QKD_NUM_QUBITS: [512, 1024, 2048, 4096, 8192]
+  eve_fraction: [0.1, 0.25, 0.5, 1.0]

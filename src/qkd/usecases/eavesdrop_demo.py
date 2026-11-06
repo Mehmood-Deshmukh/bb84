@@ -14,16 +14,17 @@ run still ends in a QBER abort, not an authentication failure.
 from __future__ import annotations
 
 import json
-import select
 import socket
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 from qkd.core.bb84_protocol import qber_exceeds_threshold
 from qkd.core.config import QBER_THRESHOLD
+from qkd.core.channel_model import decode_pulses, encode_pulses
 from qkd.core.quantum_channel import eve_intercept_resend
 from qkd.services.reporting import Reporter
-from qkd.services.wire import forward_message, recv_json, send_json
+from qkd.services.wire import forward_message, recv_json, relay_until_closed, send_json
 
 
 @dataclass(frozen=True)
@@ -43,23 +44,31 @@ def _forward_hellos(alice: socket.socket, bob: socket.socket, reporter: Reporter
     return mode != "none"
 
 
-def _intercept_qubits(alice: socket.socket, bob: socket.socket, reporter: Reporter) -> list[str]:
+def _intercept_qubits(alice: socket.socket, bob: socket.socket, reporter: Reporter, fraction: float) -> list[Optional[str]]:
     reporter.section("Phase 1: Intercepting Quantum Channel")
     reporter.info("Intercepting qubits from Alice...")
-    qasm_strings = recv_json(alice)
-    reporter.info(f"Captured {len(qasm_strings)} qubits from Alice")
+    n, index, qubits = decode_pulses(recv_json(alice))
+    # Eve sits after the lossy fibre, in front of Bob's detector: she sees the photons that
+    # arrive (null entries are background clicks at Bob, with no photon to measure)
+    photons = [i for i, q in enumerate(qubits) if q is not None]
+    reporter.info(f"Captured {len(photons)} photons from Alice ({n} pulses sent)")
 
-    reporter.info("Performing intercept-resend attack...")
-    reporter.info("  → Measuring each qubit in random basis (destroying original state)")
+    reporter.info(f"Performing intercept-resend attack on {fraction:.0%} of the qubits...")
+    reporter.info("  → Measuring each attacked qubit in a random basis (destroying original state)")
     reporter.info("  → Re-preparing new qubits based on measurement results")
     t0 = time.time()
-    modified_qasm, eve_bits, eve_bases = eve_intercept_resend(qasm_strings)
+    attacked, eve_bits_p, eve_bases_p = eve_intercept_resend([qubits[i] for i in photons], fraction)
+    modified: list[Optional[str]] = list(qubits)
+    eve_bits: list[Optional[int]] = [None] * len(qubits)
+    eve_bases: list[Optional[str]] = [None] * len(qubits)
+    for i, q, b, basis in zip(photons, attacked, eve_bits_p, eve_bases_p):
+        modified[i], eve_bits[i], eve_bases[i] = q, b, basis
     reporter.info(f"Attack complete in {time.time() - t0:.2f}s")
     reporter.info(f"Eve's intercepted bits: {eve_bits[:20]}... ({len(eve_bits)} total)")
     reporter.info(f"Eve's bases used:       {eve_bases[:20]}...")
 
     reporter.info("Forwarding modified qubits to Bob...")
-    send_json(bob, modified_qasm)
+    send_json(bob, encode_pulses(n, index, modified))
     reporter.info("Modified qubits sent to Bob (state has been disturbed)")
     return eve_bases
 
@@ -84,50 +93,42 @@ def _forward_sifting(alice: socket.socket, bob: socket.socket, reporter: Reporte
     return bob_bases, matching
 
 
-def _report_knowledge(eve_bases: list[str], bob_bases: list[str], matching: list[int], reporter: Reporter) -> int:
+def _report_knowledge(eve_bases: list[Optional[str]], bob_bases: list[str], matching: list[int], reporter: Reporter) -> int:
     reporter.section("Eve's Intelligence Gathering")
     # Alice's bases are never sent; at matching indices they equal Bob's.
     known = sum(1 for i in matching if eve_bases[i] == bob_bases[i])
     pct = known / len(matching) * 100 if matching else 0.0
     reporter.info(f"Eve's exact knowledge of final key bits: {known}/{len(matching)} ({pct:.1f}%)")
-    reporter.info("Eve knows ~50% of the sifted key bits (where all 3 bases align)")
-    reporter.info("But her interception has introduced ~25% QBER in the channel!")
+    reporter.info("Of the bits she attacked, Eve knows ~50% exactly (where all 3 bases align)")
+    reporter.info("Each attacked sifted bit is wrong for Bob with probability 1/4, which the QBER sample can see")
     return known
 
 
 def _forward_rest(alice: socket.socket, bob: socket.socket, signed: bool) -> None:
     """
-    Forward the salt, the finished exchange (signed modes), the resume negotiation when both sides
-    offered it, then file metadata and chunks until a side disconnects (with resume Bob's final
-    receipt travels back to Alice).
+    After the QBER verdict, relay everything both ways until both sides close: Cascade
+    rounds (if any), the salt, the finished exchange (signed modes), file metadata and
+    chunks. Eve no longer parses, so the number of messages does not matter.
     """
-    try:
-        forward_message(alice, bob)        # 4: salt
-        if signed:
-            bob_finished = json.loads(forward_message(bob, alice))     # 4b: Bob's finished
-            alice_finished = json.loads(forward_message(alice, bob))   # 4b: Alice's finished
-            if _offers_resume(bob_finished) and _offers_resume(alice_finished):
-                forward_message(bob, alice)    # 4c: Bob's (sealed) resume request
-                forward_message(alice, bob)    # 4d: Alice's (sealed) resume grant
-                while True:                    # 5 and 6: metadata and chunks one way, Bob's receipt back
-                    ready, _, _ = select.select([alice, bob], [], [])
-                    for src in ready:
-                        forward_message(src, bob if src is alice else alice)
-        while True:
-            forward_message(alice, bob)
-    except (ConnectionError, OSError):
-        pass
+    relay_until_closed(alice, bob)
 
 
-def _offers_resume(finished: object) -> bool:
-    """Eve reads the same plain flag the peers do (see usecases/handshake.py)."""
-    return isinstance(finished, dict) and finished.get("resume") == 1 and not isinstance(finished.get("resume"), bool)
+def run_eavesdrop(
+    alice: socket.socket,
+    bob: socket.socket,
+    reporter: Reporter,
+    threshold: float = QBER_THRESHOLD,
+    fraction: float = 1.0,
+) -> EavesdropResult:
+    """
+    Run the intercept-resend attack between connected Alice and Bob sockets.
 
-
-def run_eavesdrop(alice: socket.socket, bob: socket.socket, reporter: Reporter, threshold: float = QBER_THRESHOLD) -> EavesdropResult:
-    """Run the intercept-resend attack between connected Alice and Bob sockets."""
+    `fraction` is the share of qubits Eve attacks (1.0 = all). `aborted` reflects
+    only the QBER threshold; a later finite-key or key confirmation abort shows up
+    as the peers closing the connection while she forwards the rest.
+    """
     signed = _forward_hellos(alice, bob, reporter)
-    eve_bases = _intercept_qubits(alice, bob, reporter)
+    eve_bases = _intercept_qubits(alice, bob, reporter, fraction)
     bob_bases, matching = _forward_sifting(alice, bob, reporter)
     known = _report_knowledge(eve_bases, bob_bases, matching, reporter)
 

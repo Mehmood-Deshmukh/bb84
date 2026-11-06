@@ -31,7 +31,7 @@ from qkd.usecases.receive_file import receive_file
 from qkd.usecases.send_file import send_file
 from tests.invariants.support import proxy
 
-PARAMS = ProtocolParams(num_qubits=48)
+PARAMS = ProtocolParams()  # default N with the finite-key gate on
 
 
 def test_same_key_on_both_sides_without_eve(connected) -> None:
@@ -87,7 +87,8 @@ def test_tampered_channel_is_always_detected(parallel, make_file, tmp_path: Path
     out_dir = tmp_path / "received"
     alice_end, proxy_a = socket.socketpair()
     proxy_b, bob_end = socket.socketpair()
-    flip_all = lambda qasm_list: [_flip_every_qubit(q) for q in qasm_list]  # noqa: E731
+    # The step-1 message is channel_model.encode_pulses; null entries carry no photon
+    flip_all = lambda msg: {**msg, "qubits": [q if q is None else _flip_every_qubit(q) for q in msg["qubits"]]}  # noqa: E731
     with alice_end, proxy_a, proxy_b, bob_end:
         sent, got, _ = parallel(
             lambda: send_file(alice_end, str(src), NullReporter(), PARAMS),

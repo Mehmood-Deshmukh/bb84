@@ -18,11 +18,13 @@ from typing import Optional
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from qkd.core.crypto_utils import derive_chunk_nonce, derive_session_key, encrypt_chunk
+from qkd.core.crypto_utils import derive_chunk_nonce, derive_session_key, encrypt_chunk, key_schedule
 from qkd.services import file_stream, resume as resume_module, wire
 from qkd.services.file_stream import (
     FileMeta,
+    MetadataError,
     describe_file,
+    encrypt_metadata,
     file_sha256,
     metadata_aad,
     receive_file_meta,
@@ -110,7 +112,7 @@ def run_session(
     for t in threads:
         t.start()
     try:
-        got = receive_file_meta(receiver)
+        got = receive_file_meta(receiver, key)
         previous = store.load()
         state = store.begin(got, start_chunk, FP, "sign", previous)
         return receive_encrypted_file_resumable(
@@ -244,7 +246,7 @@ def test_whole_file_hash_mismatch_discards_everything(src: Path, store: ResumeSt
 
 
 def test_metadata_claiming_a_different_size_is_rejected_before_streaming(src: Path, store: ResumeStore) -> None:
-    with pytest.raises(ResumeError, match="num_chunks"):
+    with pytest.raises(MetadataError, match="num_chunks"):  # file_stream.FileMeta.from_message, before validate_meta
         run_session(src, store, meta_edit=lambda m: replace(m, total_size=m.total_size + CHUNK))
     assert not os.path.exists(final(store, src))
 
@@ -260,10 +262,10 @@ def test_authenticated_chunk_of_the_wrong_length_is_rejected(tmp_path: Path) -> 
     sender, receiver = socket.socketpair()
     receiver.settimeout(5)  # if the length check regresses the receiver would wait for chunk 1 forever
     with sender, receiver:
-        wire.send_json(sender, msg)
-        short, tag = encrypt_chunk(body[: CHUNK - 100], key, derive_chunk_nonce(meta.base_nonce, 0), metadata_aad(msg))
+        wire.send_bytes(sender, encrypt_metadata(msg, key_schedule(key).metadata))
+        short, tag = encrypt_chunk(body[: CHUNK - 100], key_schedule(key).file, derive_chunk_nonce(meta.base_nonce, 0), metadata_aad(msg))
         wire.send_bytes(sender, tag + short)
-        got = receive_file_meta(receiver)
+        got = receive_file_meta(receiver, key)
         state = store.begin(got, 0, FP, "sign")
         with pytest.raises(ResumeError, match="wrong length"):
             receive_encrypted_file_resumable(receiver, got, store, state, key, 0)
@@ -458,13 +460,18 @@ def test_original_and_resumed_sessions_never_share_a_key_nonce_pair(src: Path, s
     run_session(src, store, start_chunk=resume_point(store), key=key2)
     resumed = list(used)
 
+    file1, file2 = key_schedule(key1).file, key_schedule(key2).file
+    meta1, meta2 = key_schedule(key1).metadata, key_schedule(key2).metadata
     assert len(set(original)) == len(original) and len(set(resumed)) == len(resumed)
     assert not set(original) & set(resumed)
-    # even ignoring the key, the nonces differ: a fresh base nonce per session
-    assert not {n for _, n in original} & {n for _, n in resumed}
-    assert {k for k, _ in original} == {key1} and {k for k, _ in resumed} == {key2}
+    # each session uses only its own subkeys (the metadata subkey encrypts one message, at the zero nonce)
+    assert {k for k, _ in original} <= {file1, meta1} and {k for k, _ in resumed} == {file2, meta2}
+    chunks1 = [n for k, n in original if k == file1]
+    chunks2 = [n for k, n in resumed if k == file2]
+    # even ignoring the key, the chunk nonces differ: a fresh base nonce per session
+    assert not set(chunks1) & set(chunks2)
     # counters continue where the verified data ends and never go back
-    assert [int.from_bytes(n[8:], "big") for _, n in resumed] == list(range(4, 10))
+    assert [int.from_bytes(n[8:], "big") for n in chunks2] == list(range(4, 10))
 
 
 def test_every_session_draws_a_fresh_base_nonce(src: Path) -> None:

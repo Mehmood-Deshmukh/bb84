@@ -26,8 +26,8 @@ from qkd.services.reporting import (
     ConsoleReporter,
     JsonEventReporter,
 )
-from qkd.services.wire import listen
-from qkd.usecases.common import PeerAuthError, TransferInterrupted
+from qkd.services.wire import accept, listen
+from qkd.usecases.common import KeyConfirmationError, PeerAuthError, TransferInterrupted
 from qkd.usecases.resume import ResumeOptions
 from qkd.usecases.receive_file import receive_file
 
@@ -97,6 +97,20 @@ def main(argv: list[str] | None = None) -> int:
         reporter.banner("BB84 QKD Secure File Transfer", "BOB (Receiver)")
 
     reporter.stage("connecting")
+    # Load the identity before listening, so a broken identity fails before any
+    # connection is accepted, and so this setup is not counted in Alice's
+    # handshake time (she starts her clock when she sends her hello).
+    try:
+        auth = build_auth(args)
+    except PeerAuthError as exc:
+        reporter.error(f"Authentication FAILED: {exc.reason}")
+        reporter.result(OUTCOME_ABORTED_AUTH, exc.reason)
+        return 1
+    except Exception as exc:
+        reporter.error(f"Identity/auth setup failed: {exc!r}")
+        reporter.result(OUTCOME_FAILED, str(exc) or type(exc).__name__)
+        return 1
+
     with listen(args.port) as server:
         port = server.getsockname()[1]
         reporter.listening(port)
@@ -104,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         reporter.info(f"Waiting for Alice's connection ({args.timeout:.0f}s timeout)...")
         server.settimeout(args.timeout)
         try:
-            conn, addr = server.accept()
+            conn, addr = accept(server)
         except socket.timeout:
             reporter.error("Timed out waiting for Alice's connection.")
             reporter.result(OUTCOME_FAILED, "timed out waiting for the sender")
@@ -112,20 +126,13 @@ def main(argv: list[str] | None = None) -> int:
         conn.settimeout(None)
         reporter.success(f"Alice connected from {addr}")
 
-        try:
-            auth = build_auth(args)
-        except PeerAuthError as exc:
-            reporter.error(f"Authentication FAILED: {exc.reason}")
-            reporter.result(OUTCOME_ABORTED_AUTH, exc.reason)
-            return 1
-        except Exception as exc:
-            reporter.error(f"Identity/auth setup failed: {exc!r}")
-            reporter.result(OUTCOME_FAILED, str(exc) or type(exc).__name__)
-            return 1
-
         with conn:
             try:
                 result = receive_file(conn, args.output_dir, reporter, auth=auth, resume=resume_options(args))
+            except KeyConfirmationError as exc:
+                reporter.error(f"Key confirmation FAILED: {exc.reason}")
+                reporter.result(OUTCOME_ABORTED_QBER, exc.reason)
+                return 1
             except PeerAuthError as exc:
                 reporter.error(f"Authentication FAILED: {exc.reason}")
                 reporter.result(OUTCOME_ABORTED_AUTH, exc.reason)
@@ -142,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
 
     kx = result.key_exchange
     if kx.aborted:
-        reporter.result(OUTCOME_ABORTED_QBER, f"QBER {kx.qber:.2%} >= threshold {kx.threshold:.0%}")
+        reporter.result(OUTCOME_ABORTED_QBER, kx.abort_reason)
         return 1
     reporter.metrics(output_path=result.output_path, bytes_written=result.bytes_written)
     reporter.result(OUTCOME_COMPLETED)
