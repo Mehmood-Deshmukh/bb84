@@ -41,6 +41,9 @@ METRIC_FIELDS: tuple[str, ...] = (
     "peer_trust",
     "handshake_ms",
     "auth_overhead_bytes",
+    "resumed_from_bytes",
+    "bytes_total",
+    "resume_restart_reason",
 )
 
 

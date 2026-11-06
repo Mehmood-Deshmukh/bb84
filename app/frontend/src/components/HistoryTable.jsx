@@ -7,7 +7,7 @@ export default function HistoryTable({ entries }) {
     <section aria-labelledby="history-heading" className="space-y-3">
       <h2 id="history-heading" className="text-section font-semibold">History</h2>
       {entries.length === 0 ? (
-        <p className="text-small text-ink-2">Finished transfers are kept here, including declined and aborted ones.</p>
+        <p className="text-small text-ink-2">Finished transfers are kept here, including declined and aborted ones. A transfer that was interrupted is listed when it stops, and again when it finishes.</p>
       ) : (
         <table className="w-full border-collapse text-small">
           <thead className="sr-only sm:not-sr-only">
@@ -26,6 +26,9 @@ export default function HistoryTable({ entries }) {
                 <td className="min-w-0 sm:py-2 sm:pr-4 sm:align-top">
                   <span className="block truncate font-medium">{e.filename}</span>
                   <span className="text-ink-2">{formatBytes(e.file_size)}</span>
+                  {e.resumed_from_bytes > 0 ? (
+                    <span className="block text-fine text-ink-2">resumed after {formatBytes(e.resumed_from_bytes)}</span>
+                  ) : null}
                 </td>
                 <td className="col-start-2 sm:py-2 sm:pr-4 sm:align-top">
                   {e.direction === 'outgoing' ? 'To ' : 'From '}

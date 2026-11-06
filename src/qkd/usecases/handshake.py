@@ -4,6 +4,8 @@ Signed hello/finished handshake around the BB84 exchange (wire steps 0a, 0b, and
   0a A->B {"hello": {...}}      tracked in the transcript
   0b B->A {"hello": {...}}      tracked
   4b B->A, then A->B {"finished": sig, "confirm": tag}   untracked; sign and hybrid modes only
+      With resume on, each finished also carries "resume": 1. The flag is not covered by the
+      signature: it can only switch resume off (or stall it), see usecases/resume.py.
 
 Every hello carries the sender's security policy (ProtocolParams.security_policy:
 final key length, eps_sec, eps_cor, QBER threshold, finite-key enforcement); the
@@ -182,19 +184,25 @@ def alice_finished(
     transcript_hash: bytes,
     key: bytes,
     reporter: Reporter,
-) -> None:
+    offer_resume: bool = False,
+) -> bool:
     """
     Step 4b for Alice: check Bob's finished (signature, then key tag) first, then send hers.
 
-    `key` is the session key (session_key()). Raises PeerAuthError on a bad
-    signature and KeyConfirmationError on a good signature with a wrong tag.
+    `key` is the session key (session_key()). Raises PeerAuthError on a bad signature and
+    KeyConfirmationError on a good signature with a wrong tag.
+
+    Returns True if Bob's finished carried the resume flag (it is only meaningful when
+    offer_resume is also True).
     """
     with _cost(channel, state):
         reporter.info("Verifying Bob's signature and key confirmation tag...")
-        _verify_finished(channel.recv_untracked(), state.peer_id_pk, b"bob", transcript_hash, key)
+        msg = channel.recv_untracked()
+        _verify_finished(msg, state.peer_id_pk, b"bob", transcript_hash, key)
         reporter.success("Bob's finished verified: same transcript, same key")
-        channel.send_untracked(_finished(auth.seed, b"alice", transcript_hash, key))
+        channel.send_untracked(_finished(auth.seed, b"alice", transcript_hash, key, offer_resume))
     _report_cost(reporter, state)
+    return _resume_flag(msg)
 
 
 def bob_finished(
@@ -204,14 +212,22 @@ def bob_finished(
     transcript_hash: bytes,
     key: bytes,
     reporter: Reporter,
-) -> None:
-    """Step 4b for Bob: send his finished, then check Alice's (signature, then key tag)."""
+    offer_resume: bool = False,
+) -> bool:
+    """
+    Step 4b for Bob: send his finished, then check Alice's (signature, then key tag).
+
+    Returns True if Alice's finished carried the resume flag (it is only meaningful when
+    offer_resume is also True).
+    """
     with _cost(channel, state):
-        channel.send_untracked(_finished(auth.seed, b"bob", transcript_hash, key))
+        channel.send_untracked(_finished(auth.seed, b"bob", transcript_hash, key, offer_resume))
         reporter.info("Verifying Alice's signature and key confirmation tag...")
-        _verify_finished(channel.recv_untracked(), state.peer_id_pk, b"alice", transcript_hash, key)
+        msg = channel.recv_untracked()
+        _verify_finished(msg, state.peer_id_pk, b"alice", transcript_hash, key)
         reporter.success("Alice's finished verified: same transcript, same key")
     _report_cost(reporter, state)
+    return _resume_flag(msg)
 
 
 def confirmation_tag(key: bytes, role: bytes, transcript_hash: bytes) -> bytes:
@@ -275,10 +291,18 @@ def _kem(op: Callable[[], Any]) -> Any:
         raise PeerAuthError(f"malformed hello: {exc}") from None
 
 
-def _finished(seed: bytes, role: bytes, transcript_hash: bytes, key: bytes) -> dict:
+def _finished(seed: bytes, role: bytes, transcript_hash: bytes, key: bytes, resume: bool = False) -> dict:
     tag = confirmation_tag(key, role, transcript_hash)
     signature = pqc.sign(seed, finished_message(role, transcript_hash, tag))
-    return {"finished": _b64(signature), "confirm": _b64(tag)}
+    msg: dict[str, Any] = {"finished": _b64(signature), "confirm": _b64(tag)}
+    if resume:
+        msg["resume"] = 1
+    return msg
+
+
+def _resume_flag(msg: Any) -> bool:
+    """Whether a (verified) finished message offered resume. Anything but the integer 1 counts as no."""
+    return isinstance(msg, dict) and msg.get("resume") == 1 and not isinstance(msg.get("resume"), bool)
 
 
 def _verify_finished(msg: Any, peer_pk: bytes, role: bytes, transcript_hash: bytes, key: bytes) -> None:

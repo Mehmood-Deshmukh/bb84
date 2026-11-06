@@ -19,6 +19,19 @@ class PeerAuthError(Exception):
         self.reason = reason
 
 
+class TransferInterrupted(Exception):
+    """
+    A resumable transfer stopped after key confirmation (connection lost, or a chunk failed
+    authentication) and can be continued by a new session. `bytes_verified` is what the
+    receiver has safely on disk (0 on the sender's side, which cannot know).
+    """
+
+    def __init__(self, reason: str, bytes_verified: int = 0) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.bytes_verified = bytes_verified
+
+
 class KeyConfirmationError(Exception):
     """
     Raised when the peer's key confirmation tag does not match: the two keys differ.

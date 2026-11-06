@@ -10,6 +10,12 @@ Node-to-node flow (both nodes keep a transfer with the same id):
   sender       starts alice -> receiver_host:receiver_port
 
 Statuses then follow the stage/result events that alice and bob emit.
+
+With QKD_RESUME on, a transfer that stops after key confirmation (the connection drops, a runner is
+killed, a chunk fails authentication) becomes `interrupted` instead of `failed`. The sender resumes it
+with POST /transfers/{id}/resume: the same id goes back to `pending` on both nodes, the receiver
+accepts as for any offer, and a new session continues at the first chunk the receiver has not verified.
+Interrupted transfers are written to QKD_STATE_FILE so they survive a restart of the node.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Optional
 
-from qkd.core.config import IDENTITY_DIR, KNOWN_PEERS_FILE
+from qkd.core.config import IDENTITY_DIR, KNOWN_PEERS_FILE, RESUME, STATE_FILE
 from qkd.services.api.models import (
     Direction,
     HistoryEntry,
@@ -42,9 +48,19 @@ from qkd.services.discovery import NodeIdentity, PeerDirectory, PeerInfo
 from qkd.services.events import EventBus
 from qkd.services.history import HistoryStore
 from qkd.services.identity import Identity, TrustStore, load_or_create_identity
+from qkd.services.interrupted_store import InterruptedStore
 from qkd.services.peer_client import PeerClient, PeerError
 from qkd.services.process_runner import ProtocolLauncher, RunningProcess
-from qkd.services.transfer_store import ACTIVE, TERMINAL, InvalidTransition, TransferRepository, path_to
+from qkd.services.resume import ResumeStore
+from qkd.services.transfer_store import (
+    ACTIVE,
+    TERMINAL,
+    InvalidTransition,
+    TransferExists,
+    TransferNotFound,
+    TransferRepository,
+    path_to,
+)
 
 log = logging.getLogger(__name__)
 S = TransferStatus
@@ -65,6 +81,7 @@ OUTCOME_STATUS = {
     "aborted_qber": S.aborted_qber,
     "aborted_auth": S.aborted_auth,
     "failed": S.failed,
+    "interrupted": S.interrupted,
 }
 METRIC_FIELDS = (
     "raw_qubits",
@@ -79,7 +96,11 @@ METRIC_FIELDS = (
     "peer_trust",
     "handshake_ms",
     "auth_overhead_bytes",
+    "resumed_from_bytes",
+    "bytes_total",
+    "resume_restart_reason",
 )
+_SIGNED_MODES = ("sign", "hybrid")
 
 
 class UnknownPeer(Exception):
@@ -127,6 +148,8 @@ class NodeService:
         identity_dir: Optional[str | Path] = None,
         trust_store: Optional[TrustStore] = None,
         known_peers_file: Optional[str | Path] = None,
+        resume: Optional[bool] = None,
+        state_file: Optional[str | Path] = None,
     ) -> None:
         self.identity = identity
         self.repo = repo
@@ -148,6 +171,11 @@ class NodeService:
         if not self.identity.fingerprint:
             self.identity.fingerprint = self.pqc_identity.fingerprint
         self.trust_store = trust_store or TrustStore(Path(known_peers_file or KNOWN_PEERS_FILE))
+        self.resume_enabled = bool(RESUME) if resume is None else resume
+        self._state: Optional[InterruptedStore] = None
+        if self.resume_enabled:
+            self._state = InterruptedStore(state_file or STATE_FILE)
+            self._restore_interrupted()
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -297,6 +325,11 @@ class NodeService:
                     f"advertised fingerprint {peer.fingerprint!r} for peer '{request.sender.id}'"
                 )
 
+        if request.resume_transfer_id is not None:
+            resumed = self._register_resume_offer(request)
+            if resumed is not None:
+                return resumed
+
         transfer = Transfer(id=request.id, direction=Direction.incoming, status=S.pending,
                             filename=os.path.basename(request.filename), file_size=request.file_size,
                             peer=request.sender)
@@ -304,6 +337,58 @@ class NodeService:
         self._runtime[transfer.id] = _Runtime()
         self._publish_status(transfer)
         return transfer
+
+    def _register_resume_offer(self, request: IncomingTransferRequest) -> Optional[Transfer]:
+        """
+        An offer that continues an interrupted transfer: put that transfer back to `pending` so the user
+        accepts it like any offer. Returns None when this node has no such transfer (it lost its state):
+        the offer is then handled as a new transfer, and the sender restarts from byte 0.
+        """
+        if request.resume_transfer_id != request.id:
+            raise InvalidRequest("resume_transfer_id must equal the transfer id")
+        try:
+            existing = self.repo.get(request.id)
+        except TransferNotFound:
+            return None
+        if (existing.direction is not Direction.incoming or not self._same_sender(existing, request)
+                or existing.filename != os.path.basename(request.filename) or existing.file_size != request.file_size):
+            raise InvalidRequest("The resume offer does not match the interrupted transfer")
+        if existing.status is not S.interrupted:
+            raise TransferExists(request.id)
+        transfer = self._move(request.id, S.pending)
+        self._prepare_new_attempt(transfer)
+        transfer.peer = request.sender  # the sender may have a new address
+        self.repo.save(transfer)
+        return transfer
+
+    @staticmethod
+    def _same_sender(existing: Transfer, request: IncomingTransferRequest) -> bool:
+        """
+        Whether a resume offer comes from the node that started `existing`. Node ids are random per
+        start, so after a restart the PQC identity fingerprint (stable, persisted) is what matches;
+        ids are compared only when a fingerprint is missing on either side. This is a consistency
+        check on an unauthenticated HTTP offer: the binding that matters is the receiver runner
+        comparing the *authenticated* fingerprint with the one in its sidecar.
+        """
+        if existing.peer_fingerprint and request.sender_fingerprint:
+            return existing.peer_fingerprint == request.sender_fingerprint
+        return existing.peer.id == request.sender.id
+
+    def _find_peer_for(self, transfer: Transfer) -> Optional[PeerInfo]:
+        """The discovered peer for a transfer: by node id, else by identity fingerprint (the peer restarted)."""
+        peer = self._find_peer(transfer.peer.id)
+        if peer is None and transfer.peer_fingerprint:
+            peer = next((p for p in self.directory.peers() if p.fingerprint == transfer.peer_fingerprint), None)
+        return peer
+
+    def _prepare_new_attempt(self, transfer: Transfer) -> Transfer:
+        """Clear what describes the previous attempt; the new one reports its own."""
+        transfer.attempt += 1
+        transfer.error = None
+        transfer.stage = None
+        transfer.progress = None
+        transfer.resume_restart_reason = None
+        return self.repo.save(transfer)
 
     # ── transfers: accept / reject / cancel ────────────────────
 
@@ -325,6 +410,42 @@ class NodeService:
         if patch.receiver_port is None:
             raise InvalidRequest("receiver_port is required to accept an outgoing transfer")
         return await self._start_sender(transfer, patch.receiver_port)
+
+    async def resume(self, transfer_id: str) -> Transfer:
+        """
+        Resume an interrupted outgoing transfer: go back to `pending` and re-offer it to the receiver with
+        the same id. The receiver accepts as for any offer, then a new session continues where its
+        verified data ends. Raises InvalidTransition (409) unless the transfer is interrupted.
+        """
+        transfer = self.repo.get(transfer_id)
+        if transfer.direction is not Direction.outgoing:
+            raise InvalidRequest("Only the sending node can resume a transfer")
+        if transfer.status is not S.interrupted:
+            raise InvalidTransition(transfer.status, S.pending)
+        rt = self._runtime.get(transfer_id)
+        if rt is None or rt.upload_path is None or not rt.upload_path.exists():
+            self._fail(transfer_id, "The uploaded file is no longer available")
+            raise LaunchFailed("The uploaded file is no longer available")
+
+        transfer = self._move(transfer_id, S.pending)
+        peer = self._find_peer_for(transfer)
+        if peer is not None:  # the receiver may have moved or restarted (new node id) since
+            transfer.peer = PeerRef(id=peer.id, name=peer.name, host=peer.host, port=peer.port)
+        self._prepare_new_attempt(transfer)
+        offer = IncomingTransferRequest(
+            id=transfer_id,
+            filename=transfer.filename,
+            file_size=transfer.file_size,
+            sender=self._self_ref(),
+            sender_fingerprint=self.pqc_identity.fingerprint,
+            resume_transfer_id=transfer_id,
+        )
+        try:
+            await self.peers.offer_transfer(transfer.peer.host, transfer.peer.port, offer)
+        except PeerError as exc:  # nothing was lost: it is still resumable
+            self._move(transfer_id, S.interrupted, error=f"The receiver did not take the resume offer: {exc}")
+            raise
+        return self.repo.get(transfer_id)
 
     async def cancel(self, transfer_id: str) -> Transfer:
         """Cancel a pending or running transfer and tell the peer. Raises InvalidTransition once finished."""
@@ -355,6 +476,8 @@ class NodeService:
         peer = self._find_peer(transfer.peer.id)
         if peer and peer.fingerprint:
             args.extend(["--peer-fingerprint", peer.fingerprint])
+        if self.resume_enabled:
+            args.append("--resume")
         await self._launch(transfer.id, "bob", args)
 
         try:
@@ -388,6 +511,8 @@ class NodeService:
         peer = self._find_peer(transfer.peer.id)
         if peer and peer.fingerprint:
             args.extend(["--peer-fingerprint", peer.fingerprint])
+        if self.resume_enabled:
+            args.append("--resume")
         await self._launch(transfer.id, "alice", args)
         return self.repo.get(transfer.id)
 
@@ -404,11 +529,13 @@ class NodeService:
 
     async def _supervise(self, transfer_id: str, role: str, rt: _Runtime) -> None:
         assert rt.process is not None
+        process = rt.process
         try:
-            async for event in rt.process.events():
+            async for event in process.events():
                 self._apply_event(transfer_id, event)
-            code = await rt.process.wait()
-            self._fail(transfer_id, f"{role} exited with code {code} before finishing")
+            code = await process.wait()
+            if rt.process is process:  # not superseded by a resumed attempt
+                self._runner_exited(transfer_id, f"{role} exited with code {code} before finishing")
         except Exception as exc:  # keep the node alive whatever the runner does
             log.exception("Supervising %s for %s failed", role, transfer_id)
             self._fail(transfer_id, f"{role} supervision failed: {exc!r}")
@@ -445,19 +572,34 @@ class NodeService:
         elif type_ == "result" and payload.get("outcome") in OUTCOME_STATUS:
             self._move(transfer_id, OUTCOME_STATUS[payload["outcome"]], error=payload.get("error"))
 
+    def _runner_exited(self, transfer_id: str, error: str) -> None:
+        """A runner's event stream ended without a result: interrupted if it can be resumed, else failed."""
+        transfer = self.repo.get(transfer_id)
+        if transfer.status in TERMINAL or transfer.status is S.interrupted:
+            return
+        resumable = (self.resume_enabled and transfer.status is S.transferring
+                     and transfer.auth_mode in _SIGNED_MODES)
+        if resumable:
+            self._move(transfer_id, S.interrupted, error=error)
+        else:
+            self._fail(transfer_id, error)
+
     # ── status changes ─────────────────────────────────────────
 
     def _move(self, transfer_id: str, target: TransferStatus, error: Optional[str] = None) -> Transfer:
         """Step to target (through intermediate statuses if needed), publish, and finish up on terminal."""
         transfer = self.repo.get(transfer_id)
+        came_from = transfer.status
         for status in path_to(transfer.status, target):
             transfer.status = status
-            if status in TERMINAL and status is not S.completed:
+            if (status in TERMINAL and status is not S.completed) or status is S.interrupted:
                 transfer.error = error
             self.repo.save(transfer)
             self._publish_status(transfer)
         if transfer.status in TERMINAL:
             self._finish(transfer)
+        elif transfer.status is S.interrupted:
+            self._on_interrupted(transfer, new=came_from is not S.pending)
         return transfer
 
     def _fail(self, transfer_id: str, error: str) -> Transfer:
@@ -476,15 +618,75 @@ class NodeService:
         rt = self._runtime.get(transfer.id)
         if rt and rt.upload_path:
             shutil.rmtree(rt.upload_path.parent, ignore_errors=True)
+        if self._state is not None:
+            self._state.remove(transfer.id)
+            if transfer.direction is Direction.incoming:  # nothing left to resume: drop the verified bytes too
+                try:
+                    ResumeStore(self.output_dir, transfer.id).discard()
+                except (ValueError, OSError) as exc:
+                    log.warning("Could not remove resume state of %s: %s", transfer.id, exc)
+        self._append_history(transfer)
+
+    def _append_history(self, transfer: Transfer) -> None:
         try:
             self.history.append(HistoryEntry(
                 id=transfer.id, finished_at=utcnow(), direction=transfer.direction, status=transfer.status,
                 filename=transfer.filename, file_size=transfer.file_size, peer_name=transfer.peer.name,
                 peer_host=transfer.peer.host, qber=transfer.qber, key_bits=transfer.key_bits, error=transfer.error,
                 auth_mode=transfer.auth_mode, peer_fingerprint=transfer.peer_fingerprint, peer_trust=transfer.peer_trust,
+                resumed_from_bytes=transfer.resumed_from_bytes, bytes_total=transfer.bytes_total,
             ))
         except OSError as exc:
             log.warning("Could not write history: %s", exc)
+
+    # ── interrupted transfers ──────────────────────────────────
+
+    def _on_interrupted(self, transfer: Transfer, new: bool = True) -> None:
+        """Keep what a resume needs: stop the runner, park the upload, persist the record, log it in history."""
+        rt = self._runtime.get(transfer.id)
+        if rt and rt.process:
+            rt.process.terminate()
+        if self._state is not None:
+            if rt and rt.upload_path and rt.upload_path.exists() and transfer.direction is Direction.outgoing:
+                rt.upload_path = self._park_upload(transfer.id, rt.upload_path)
+            self._state.put(transfer.id, transfer.model_dump(mode="json"), str(rt.upload_path) if rt and rt.upload_path else None)
+        if new:
+            self._append_history(transfer)
+
+    def _park_upload(self, transfer_id: str, path: Path) -> Path:
+        """Move an upload out of the per-process temp dir into the state directory."""
+        assert self._state is not None
+        dest = self._state.uploads_dir / transfer_id / path.name
+        if path == dest:
+            return path
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(dest))
+            shutil.rmtree(path.parent, ignore_errors=True)
+            return dest
+        except OSError as exc:
+            log.warning("Could not keep the upload of %s for a resume: %s", transfer_id, exc)
+            return path
+
+    def _restore_interrupted(self) -> None:
+        """Load interrupted transfers from the state file (called once, at construction)."""
+        assert self._state is not None
+        for record in self._state.load_all():
+            try:
+                transfer = Transfer.model_validate(record["transfer"])
+            except (ValueError, KeyError):
+                continue
+            upload = Path(record["upload_path"]) if record.get("upload_path") else None
+            if transfer.direction is Direction.outgoing and (upload is None or not upload.exists()):
+                transfer.status, transfer.error = S.failed, "The uploaded file is gone, so the transfer cannot be resumed"
+                self._state.remove(transfer.id)
+            else:
+                transfer.status = S.interrupted
+            try:
+                self.repo.add(transfer)
+            except TransferExists:
+                continue
+            self._runtime[transfer.id] = _Runtime(upload_path=upload)
 
     def _self_ref(self) -> PeerRef:
         return PeerRef(id=self.identity.id, name=self.identity.name, host=self.identity.host, port=self.identity.port)

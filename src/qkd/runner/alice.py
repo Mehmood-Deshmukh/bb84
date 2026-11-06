@@ -16,18 +16,20 @@ import argparse
 import sys
 from pathlib import Path
 
-from qkd.core.config import ALICE_HOST, AUTH_MODE, BOB_PORT, EVE_PORT, IDENTITY_DIR, KNOWN_PEERS_FILE, TOFU
+from qkd.core.config import RESUME, RESUME_SYNC_CHUNKS, ALICE_HOST, AUTH_MODE, BOB_PORT, EVE_PORT, IDENTITY_DIR, KNOWN_PEERS_FILE, TOFU
 from qkd.services.reporting import (
     OUTCOME_ABORTED_AUTH,
     OUTCOME_ABORTED_QBER,
     OUTCOME_COMPLETED,
     OUTCOME_FAILED,
+    OUTCOME_INTERRUPTED,
     ConsoleReporter,
     JsonEventReporter,
     Reporter,
 )
 from qkd.services.wire import connect_with_retry
-from qkd.usecases.common import KeyConfirmationError, PeerAuthError
+from qkd.usecases.common import KeyConfirmationError, PeerAuthError, TransferInterrupted
+from qkd.usecases.resume import ResumeOptions
 from qkd.usecases.send_file import send_file
 
 
@@ -46,7 +48,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Pin a specific peer fingerprint (uses PinnedVerifier)")
     parser.add_argument("--identity", default=IDENTITY_DIR,
                         help=f"Identity directory (default: {IDENTITY_DIR})")
+    parser.add_argument("--resume", action="store_true", default=bool(RESUME),
+                        help="Make the transfer resumable (needs --transfer-id and auth sign or hybrid; "
+                             "default: QKD_RESUME)")
     args = parser.parse_args(argv)
+    if args.resume and not args.transfer_id:
+        parser.error("--resume needs --transfer-id (it names the interrupted transfer)")
     if args.port is None:
         args.port = EVE_PORT if args.eve_mode else BOB_PORT
     return args
@@ -85,6 +92,10 @@ def build_auth(args: argparse.Namespace):
     )
 
 
+def resume_options(args: argparse.Namespace) -> ResumeOptions | None:
+    return ResumeOptions(args.transfer_id, sync_chunks=RESUME_SYNC_CHUNKS) if args.resume else None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     reporter = make_reporter(args)
@@ -115,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         with sock:
-            result = send_file(sock, args.file, reporter, auth=auth)
+            result = send_file(sock, args.file, reporter, auth=auth, resume=resume_options(args))
     except KeyConfirmationError as exc:
         reporter.error(f"Key confirmation FAILED: {exc.reason}")
         reporter.result(OUTCOME_ABORTED_QBER, exc.reason)
@@ -123,6 +134,10 @@ def main(argv: list[str] | None = None) -> int:
     except PeerAuthError as exc:
         reporter.error(f"Authentication FAILED: {exc.reason}")
         reporter.result(OUTCOME_ABORTED_AUTH, exc.reason)
+        return 1
+    except TransferInterrupted as exc:
+        reporter.warning(f"Transfer interrupted: {exc.reason}. It can be resumed.")
+        reporter.result(OUTCOME_INTERRUPTED, exc.reason)
         return 1
     except Exception as exc:
         reporter.error(f"Transfer FAILED: {exc!r}")

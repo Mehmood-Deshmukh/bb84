@@ -3,7 +3,7 @@
 // See http://127.0.0.1:8000/docs for the live schema.
 
 /**
- * @typedef {'pending'|'accepted'|'key_exchange'|'transferring'|'completed'|'rejected'|'aborted_qber'|'aborted_auth'|'failed'|'cancelled'} TransferStatus
+ * @typedef {'pending'|'accepted'|'key_exchange'|'transferring'|'interrupted'|'completed'|'rejected'|'aborted_qber'|'aborted_auth'|'failed'|'cancelled'} TransferStatus
  * @typedef {'outgoing'|'incoming'} Direction
  * @typedef {'connecting'|'authentication'|'quantum_transmission'|'sifting'|'qber_estimation'|'reconciliation'|'privacy_amplification'|'key_confirmation'|'file_transfer'|'done'} Stage
  * @typedef {'new'|'pinned'|'verified'} PeerTrust
@@ -41,6 +41,10 @@
  * @property {PeerTrust|null} [peer_trust]
  * @property {number|null} [handshake_ms]
  * @property {number|null} [auth_overhead_bytes]
+ * @property {number} [attempt] 1 for the first try; each resume adds one
+ * @property {number|null} [resumed_from_bytes]
+ * @property {number|null} [bytes_total]
+ * @property {string|null} [resume_restart_reason]
  * @property {TransferProgress|null} progress
  * @property {string|null} output_path
  * @property {string|null} error
@@ -77,6 +81,8 @@
  * @property {string|null} [auth_mode]
  * @property {string|null} [peer_fingerprint]
  * @property {PeerTrust|null} [peer_trust]
+ * @property {number|null} [resumed_from_bytes]
+ * @property {number|null} [bytes_total]
  * @property {string|null} error
  *
  * @typedef {object} TransferEvent
@@ -90,6 +96,9 @@
 
 /** @type {ReadonlySet<TransferStatus>} */
 export const TERMINAL_STATUSES = new Set(['completed', 'rejected', 'aborted_qber', 'aborted_auth', 'failed', 'cancelled'])
+
+/** Not finished and not running: the sender can resume. @type {ReadonlySet<TransferStatus>} */
+export const RESUMABLE_STATUSES = new Set(['interrupted'])
 
 /** @type {ReadonlySet<TransferStatus>} */
 export const ACTIVE_STATUSES = new Set(['accepted', 'key_exchange', 'transferring'])
