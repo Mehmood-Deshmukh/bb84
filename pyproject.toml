@@ -13,6 +13,7 @@ dependencies = [
     "qiskit-aer>=0.14",
     "cryptography>=50",
     "numpy>=1.24",
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
