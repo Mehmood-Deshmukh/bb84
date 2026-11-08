@@ -141,8 +141,8 @@ RECONCILIATION = _env("RECONCILIATION", "none", _validate_reconciliation)
 # ─────────────────────────────────────────────
 def _validate_source(raw: str) -> str:
     val = raw.strip().lower()
-    if val not in {"single", "decoy"}:
-        raise ValueError(f"Invalid source: {raw!r}. Allowed: single, decoy")
+    if val not in {"single", "wcp", "decoy"}:
+        raise ValueError(f"Invalid source: {raw!r}. Allowed: single, wcp, decoy")
     return val
 
 
@@ -169,6 +169,13 @@ def validate_decoy_setup(intensities: tuple, probs: tuple) -> None:
 # "single" keeps the original single-photon-source behaviour (every existing run). "decoy"
 # switches Alice to a weak coherent source with three intensities and runs the decoy reveal
 # (wire step 2d) and the decoy asymptotic estimate (core/decoy.py).
+#
+# "wcp" is a weak coherent laser at the signal intensity only (no decoy or vacuum pulses),
+# still gated by the single-photon Tomamichel finite-key bound (core/finite_key.py). It is
+# DELIBERATELY INSECURE: a real laser emits multi-photon pulses, and without decoy states the
+# single-photon gate cannot bound the information a photon-number-splitting (PNS) eavesdropper
+# gains from them (see core/quantum_channel.eve_pns). It exists only as the vulnerable baseline
+# the PNS experiment breaks; never use it for a key you rely on.
 SOURCE = _env("SOURCE", "single", _validate_source)
 # (signal, decoy, vacuum) mean photon numbers and the probability of sending each.
 DECOY_INTENSITIES = _env("DECOY_INTENSITIES", (0.48, 0.1, 0.0), _csv_floats)
@@ -204,7 +211,7 @@ class ProtocolParams:
     # background clicks, Bob's side the misalignment error (see channel_model.py).
     channel: ChannelParams = CHANNEL
     reconciliation: str = RECONCILIATION
-    # Photon source: "single" (default) or "decoy". The intensities/probs are the weak
+    # Photon source: "single" (default), "wcp", or "decoy". The intensities/probs are the weak
     # coherent source's (signal, decoy, vacuum) means and their probabilities; they are
     # policy (both peers must agree) because Bob counts clicks per intensity label.
     source: str = SOURCE
@@ -213,7 +220,28 @@ class ProtocolParams:
 
     @property
     def decoy_enabled(self) -> bool:
+        """True for the full decoy protocol (three intensities, wire step 2d, decoy gate)."""
         return self.source == "decoy"
+
+    @property
+    def weak_coherent(self) -> bool:
+        """True for any weak-coherent source (wcp or decoy): pulses carry Poisson photon numbers."""
+        return self.source in ("wcp", "decoy")
+
+    @property
+    def signal_intensity(self) -> float:
+        """The signal mean photon number mu (the only intensity a wcp laser sends)."""
+        return self.intensities[0]
+
+    def source_mix(self) -> tuple[tuple, tuple]:
+        """
+        The (intensities, probs) a weak-coherent source actually sends: all three for decoy,
+        just the signal intensity (probability 1) for wcp. Used by the sampler and by the PNS
+        eavesdropper to compute the honest per-intensity gains.
+        """
+        if self.source == "decoy":
+            return tuple(self.intensities), tuple(self.probs)
+        return (self.intensities[0],), (1.0,)
 
     def security_policy(self) -> dict:
         """

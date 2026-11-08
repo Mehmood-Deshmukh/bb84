@@ -13,19 +13,27 @@ from __future__ import annotations
 import argparse
 import sys
 
-from qkd.core.config import ALICE_HOST, BOB_PORT, EVE_PORT
+from qkd.core.config import ALICE_HOST, BOB_PORT, EVE_PORT, ProtocolParams
 from qkd.services.reporting import eve_console
 from qkd.services.wire import accept, connect_with_retry, listen
 from qkd.usecases.eavesdrop_demo import run_eavesdrop
+from qkd.usecases.pns_demo import run_pns
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Eve's intercept-resend proxy.")
+    parser = argparse.ArgumentParser(description="Run Eve's eavesdropper proxy.")
     parser.add_argument("--bob-host", default=ALICE_HOST, help=f"Bob's host (default: {ALICE_HOST})")
     parser.add_argument("--bob-port", type=int, default=BOB_PORT, help=f"Bob's port (default: {BOB_PORT})")
     parser.add_argument("--listen-port", type=int, default=EVE_PORT, help=f"Port Alice connects to (default: {EVE_PORT})")
+    parser.add_argument("--attack", choices=["intercept", "pns"], default="intercept",
+                        help="intercept-resend (default) or photon-number-splitting (needs a weak-coherent "
+                             "source and Alice in --eve-mode)")
     parser.add_argument("--fraction", type=float, default=1.0,
-                        help="Share of qubits to intercept, between 0 and 1 (default: 1.0, every qubit)")
+                        help="intercept: share of qubits Eve intercepts, 0 to 1 (default: 1.0)")
+    parser.add_argument("--multi-fraction", type=float, default=None,
+                        help="pns: share of multi-photon pulses forwarded (default: tune to the honest gain)")
+    parser.add_argument("--forward-fraction", type=float, default=None,
+                        help="pns: share of single-photon pulses forwarded (default: tune to the honest gain)")
     args = parser.parse_args(argv)
     if not 0.0 <= args.fraction <= 1.0:
         parser.error("--fraction must be between 0 and 1")
@@ -35,7 +43,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     reporter = eve_console()
-    reporter.banner("BB84 QKD - EVE (Eavesdropper / MITM)", "Intercept-Resend Attack")
+    pns = args.attack == "pns"
+    reporter.banner("BB84 QKD - EVE (Eavesdropper / MITM)",
+                    "Photon-Number-Splitting Attack" if pns else "Intercept-Resend Attack")
     reporter.section("Setting up Man-in-the-Middle Proxy")
 
     reporter.info(f"Connecting to Bob at {args.bob_host}:{args.bob_port}...")
@@ -46,7 +56,11 @@ def main(argv: list[str] | None = None) -> int:
             alice, addr = accept(server)
             with alice:
                 reporter.info(f"Alice connected from {addr}")
-                run_eavesdrop(alice, bob, reporter, fraction=args.fraction)
+                if pns:
+                    run_pns(alice, bob, reporter, ProtocolParams(),
+                            forward_fraction=args.forward_fraction, multi_fraction=args.multi_fraction)
+                else:
+                    run_eavesdrop(alice, bob, reporter, fraction=args.fraction)
     return 0
 
 

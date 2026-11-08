@@ -60,6 +60,32 @@ class DecoyClicks:
         return len(self.index)
 
 
+def sample_photon_numbers(n_pulses: int, intensities, probs,
+                          rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Draw the intensity label and Poisson photon number of every one of n_pulses pulses,
+    BEFORE any channel loss. Returns (labels, photons, sent).
+
+    labels[i] in range(len(intensities)); photons[i] ~ Poisson(intensities[labels[i]]); sent is
+    the per-intensity pulse count over all n_pulses. This is what a photon-number-splitting Eve
+    sees when Alice hands her the pulses in front of the fibre (usecases/send_file eve-mode): the
+    photon number stands in for Eve's quantum non-demolition measurement of the pulse. The honest
+    path never calls this; it uses sample_clicks_decoy, which only materialises the clicked pulses.
+    """
+    intensities = np.asarray(intensities, dtype=float)
+    probs = np.asarray(probs, dtype=float)
+    if intensities.shape != probs.shape or intensities.ndim != 1:
+        raise ValueError("intensities and probs must be 1-D arrays of the same length")
+    if n_pulses < 0:
+        raise ValueError("n_pulses must not be negative")
+    if n_pulses == 0:
+        return (np.zeros(0, np.int8), np.zeros(0, np.int64), np.zeros(len(intensities), np.int64))
+    labels = rng.choice(len(intensities), size=n_pulses, p=probs)
+    photons = rng.poisson(intensities[labels])
+    sent = np.bincount(labels, minlength=len(intensities)).astype(np.int64)
+    return labels.astype(np.int8), photons.astype(np.int64), sent
+
+
 def sample_clicks_decoy(n_pulses: int, intensities, probs, params: ChannelParams,
                         rng: np.random.Generator) -> DecoyClicks:
     """

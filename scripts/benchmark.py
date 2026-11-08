@@ -102,8 +102,9 @@ METRICS = [
     "decoy_clicks_signal", "decoy_clicks_decoy", "decoy_clicks_vacuum",
     "decoy_Y1_lower", "decoy_e1_upper", "decoy_Q1_lower",
 ]
-SPECIAL = {"mode", "payload_bytes", "eve_fraction", "rtt_ms", "target_detected"}
-DEFAULTS = {"mode": "none", "payload_bytes": 1000, "eve_fraction": 0.0, "rtt_ms": None, "target_detected": None}
+SPECIAL = {"mode", "payload_bytes", "eve_fraction", "eve_attack", "rtt_ms", "target_detected"}
+DEFAULTS = {"mode": "none", "payload_bytes": 1000, "eve_fraction": 0.0, "eve_attack": "none",
+            "rtt_ms": None, "target_detected": None}
 LATENCY_PROXY = ROOT / "scripts" / "latency_proxy.py"
 PROCESS_TIMEOUT = 600.0
 
@@ -261,6 +262,7 @@ def point_channel(point: dict, base_env: dict):
 def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict, base_env: dict) -> dict:
     """One Alice/Bob (and maybe Eve) run for a grid point. Returns a flat result row."""
     mode, fraction = point["mode"], float(point["eve_fraction"])
+    attack = str(point.get("eve_attack", "none"))
     env = {**base_env, **{k: str(v) for k, v in point.items() if k not in SPECIAL}}
     channel = point_channel(point, base_env)
     if point.get("target_detected") is not None:
@@ -284,7 +286,16 @@ def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict
         bob_port = bob_reader.port.get(timeout=120)
 
         alice_port = bob_port
-        if fraction > 0:
+        alice_eve = []
+        if attack == "pns":
+            # PNS Eve: Alice hands her pre-loss pulses (needs --eve-mode and a weak-coherent source).
+            alice_port = free_port()
+            alice_eve = ["--eve-mode"]
+            procs.append(subprocess.Popen(
+                runner("eve", "--attack", "pns", "--bob-port", str(bob_port), "--listen-port", str(alice_port)),
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ))
+        elif fraction > 0:
             alice_port = free_port()
             procs.append(subprocess.Popen(
                 runner("eve", "--bob-port", str(bob_port), "--listen-port", str(alice_port), "--fraction", str(fraction)),
@@ -306,7 +317,8 @@ def run_once(point: dict, payload: Path, payload_sha: str, work: Path, ids: dict
 
         wall_start = time.perf_counter()
         alice = subprocess.run(
-            runner("alice", str(payload), "--host", "127.0.0.1", "--port", str(alice_port), "--events", "json", *auth_alice),
+            runner("alice", str(payload), "--host", "127.0.0.1", "--port", str(alice_port), "--events", "json",
+                   *alice_eve, *auth_alice),
             env=env, capture_output=True, text=True, timeout=PROCESS_TIMEOUT,
         )
         wall_s = time.perf_counter() - wall_start

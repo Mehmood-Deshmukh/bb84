@@ -56,17 +56,18 @@ class ReceiveResult:
 
 def _measure(
     channel: TranscriptChannel, link: ChannelParams, reporter: Reporter
-) -> tuple[int, list[int], list[str]]:
+) -> tuple[int, list[int], list[str], list[int]]:
     """
     Step 1 for Bob: receive the pulses that clicked, measure them, return
-    (pulses sent, bits, bases) with one bit and basis per clicked pulse.
+    (pulses sent, bits, bases, detected index) with one bit and basis per clicked pulse and
+    the global pulse number of each click.
 
     Bob's detector is emulated here: photons are measured in a random basis and the
     result is flipped with the misalignment probability; a click from background alone
     (a null qubit) gives a uniformly random bit.
     """
     reporter.info("Receiving qubits from quantum channel...")
-    n, _index, qubits = decode_pulses(channel.recv_untracked())
+    n, index, qubits = decode_pulses(channel.recv_untracked())
     m = len(qubits)
     photons = [i for i, q in enumerate(qubits) if q is not None]
     reporter.success(f"{m} of {n} pulses clicked ({len(photons)} photons, {m - len(photons)} background)")
@@ -86,15 +87,17 @@ def _measure(
     reporter.success(f"Measured {len(photons)} qubits in {time.perf_counter() - t0:.2f}s")
     # Time spent in the simulator (QRNG and measurement), kept apart from protocol cost
     reporter.metrics(sim_ms=round((time.perf_counter() - t_sim) * 1000, 3))
-    return n, bits, bases
+    return n, bits, bases, index
 
 
 def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str],
-          reporter: Reporter) -> tuple[list[int], list[int]]:
+          index: list[int], reporter: Reporter, preloss: bool) -> tuple[list[int], list[int]]:
     reporter.stage("sifting")
     reporter.section("Phase 2: Classical Channel (Basis Exchange)")
     reporter.info("Sending measurement bases to Alice...")
-    channel.send_json(bases)
+    # With an eve-mode pre-loss handoff Bob's detections are the ground truth (a PNS Eve changed
+    # which pulses reached him), so he reports the global indices alongside his bases.
+    channel.send_json({"bases": bases, "detected": index} if preloss else bases)
 
     reporter.info("Receiving matching indices from Alice...")
     matching = channel.recv_json()
@@ -119,12 +122,18 @@ def _answer_qber_sample(channel: TranscriptChannel, sifted: list[int], reporter:
     return channel.recv_json()["qber"], sample_indices
 
 
-def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter) -> KeyExchangeResult:
-    """Bob's side of BB84 up to and including privacy amplification (steps 1 to 4)."""
+def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter,
+                     preloss: bool = False) -> KeyExchangeResult:
+    """
+    Bob's side of BB84 up to and including privacy amplification (steps 1 to 4).
+
+    `preloss` (announced in Alice's hello) makes Bob report his detected pulse indices in step 2,
+    so Alice sifts against his ground truth under an eve-mode pre-loss handoff.
+    """
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
-    raw, bits, bases = _measure(channel, params.channel, reporter)
-    sifted, matching = _sift(channel, raw, bits, bases, reporter)
+    raw, bits, bases, index = _measure(channel, params.channel, reporter)
+    sifted, matching = _sift(channel, raw, bits, bases, index, reporter, preloss)
 
     # With a decoy source, read the intensity labels (step 2d) and keep only the signal
     # intensity for the key; decoy and vacuum bits are revealed and used only for estimation.
@@ -196,7 +205,7 @@ def receive_file(
     reporter.section("Phase 0: Authentication (Hello Exchange)")
     handshake = bob_hello(channel, auth, reporter, params)
 
-    kx = run_key_exchange(channel, params, reporter)
+    kx = run_key_exchange(channel, params, reporter, preloss=handshake.preloss)
     if kx.aborted:
         return ReceiveResult(kx)
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import socket
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -37,7 +38,7 @@ from qkd.core.bb84_protocol import (
 from qkd.core.channel_model import ChannelParams, encode_pulses, sample_clicks
 from qkd.core.config import ProtocolParams
 from qkd.core.quantum_channel import prepare_qubits
-from qkd.core.source import sample_clicks_decoy
+from qkd.core.source import SIGNAL, sample_clicks_decoy, sample_photon_numbers
 from qkd.services.file_stream import describe_file, send_encrypted_file
 from qkd.services.reporting import Reporter
 from qkd.services.resume import ResumeError, chunk_boundary
@@ -57,34 +58,61 @@ from qkd.usecases.reconcile import alice_reconcile
 from qkd.usecases.resume import ResumeOptions, alice_await_receipt, alice_negotiate, wants_resume
 
 
-def _transmit_qubits(
-    channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter
-) -> tuple[list[int], list[str], Optional[tuple[list[int], list[int]]]]:
+@dataclass
+class _AliceTx:
     """
-    Send n pulses through the simulated channel; return Alice's bits and bases for the
-    pulses that clicked at Bob (in qubit-message order), plus the decoy context.
+    Alice's per-pulse transmission data, indexed to match the pulses Bob will sift.
 
-    The fibre and Bob's detector efficiency and background are emulated here, on the
-    sending side: only clicked pulses are simulated (exact in distribution). A click from
-    background alone is sent as null, since its photon never arrived. Alice's protocol logic
-    still learns which pulses clicked only from Bob's bases in step 2. On the ideal channel
-    every pulse clicks.
+    Without pre-loss handoff, bits/bases/labels hold one entry per pulse that clicked at Bob,
+    in qubit-message order (the detected set is Alice's own sampling). With pre-loss handoff
+    (eve-mode weak-coherent source) they hold one entry per PULSE SENT, indexed by global pulse
+    number: the detected set is not known until Bob reports it in step 2, so the per-detected
+    arrays are built there. `labels`/`sent` are None for the single-photon source.
+    """
 
-    With a decoy source each pulse also has an intensity label and a photon number; the
-    returned decoy context is (labels per clicked pulse, pulses sent per intensity). The
-    qubit message (step 1) is unchanged in either case and carries no labels (Eve reads it).
-    The returned context is None for the single-photon source.
+    bits: list[int]
+    bases: list[str]
+    labels: Optional[list[int]]
+    sent: Optional[list[int]]
+    preloss: bool
+
+
+def _transmit_qubits(
+    channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter, preloss: bool
+) -> _AliceTx:
+    """
+    Send n pulses through the simulated channel and return Alice's per-pulse data (see _AliceTx).
+
+    Normal path: the fibre and Bob's detector efficiency and background are emulated here, on
+    the sending side; only clicked pulses are simulated (exact in distribution), a background
+    click is sent as null, and Alice learns which pulses clicked only from Bob's bases in step 2.
+    With a weak-coherent source each clicked pulse also carries an intensity label and photon
+    number. The step-1 qubit message is unchanged and carries no labels (Eve reads it).
+
+    Pre-loss handoff (eve-mode, weak-coherent): a photon-number-splitting Eve replaces the fibre,
+    so she must see every pulse before the loss. Alice generates ALL n pulses (label, Poisson
+    photon number, bit, basis), prepares a qubit for each pulse with n >= 1, and sends the whole
+    pre-loss stream over an untracked message to the Eve proxy INSTEAD of the step-1 qubit
+    message; Eve forwards a post-loss step-1 message to Bob. Alice keeps the full per-pulse arrays
+    and learns which pulses reached Bob from his detected-index report in step 2.
     """
     n, link = params.num_qubits, params.channel
     reporter.metrics(raw_qubits=n)
     t_sim = time.perf_counter()
     rng = np.random.default_rng()
-    if params.decoy_enabled:
-        clicks = sample_clicks_decoy(n, params.intensities, params.probs, link, rng)
-        decoy_ctx: Optional[tuple[list[int], list[int]]] = (clicks.label.tolist(), clicks.sent.tolist())
+
+    if preloss:
+        tx = _transmit_preloss(channel, params, reporter, rng, t_sim)
+        return tx
+
+    if params.weak_coherent:
+        mix_i, mix_p = params.source_mix()
+        clicks = sample_clicks_decoy(n, mix_i, mix_p, link, rng)
+        labels: Optional[list[int]] = clicks.label.tolist()
+        sent: Optional[list[int]] = clicks.sent.tolist()
     else:
         clicks = sample_clicks(n, link, rng)
-        decoy_ctx = None
+        labels = sent = None
     m = len(clicks)
     reporter.info(f"Channel: {m} of {n} pulses click at Bob "
                   f"({int(clicks.signal.sum())} photons, {m - int(clicks.signal.sum())} background)")
@@ -107,27 +135,80 @@ def _transmit_qubits(
     channel.send_untracked(encode_pulses(n, clicks.index.tolist(), qubits))
     reporter.success("Qubits transmitted")
     reporter.metrics(sim_ms=round(sim_ms, 3), qubit_bytes=channel.bytes_sent - sent_before, detected=m)
-    return bits, bases, decoy_ctx
+    return _AliceTx(bits, bases, labels, sent, preloss=False)
 
 
-def _sift(channel: TranscriptChannel, bits: list[int], bases: list[str],
-          reporter: Reporter) -> tuple[list[int], list[int]]:
+def _transmit_preloss(channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter,
+                      rng: np.random.Generator, t_sim: float) -> _AliceTx:
+    """Generate the full pre-loss pulse stream and hand it to the Eve proxy (see _transmit_qubits)."""
+    n = params.num_qubits
+    mix_i, mix_p = params.source_mix()
+    label_arr, photon_arr, sent_arr = sample_photon_numbers(n, mix_i, mix_p, rng)
+    labels = label_arr.tolist()
+    photons = photon_arr.tolist()
+    bits = generate_random_bits(n)
+    bases = generate_random_bases(n)
+
+    reporter.info(f"Eve-mode pre-loss handoff: generating all {n} pulses "
+                  f"({int((photon_arr >= 1).sum())} with a photon)...")
+    with_photon = [i for i in range(n) if photons[i] >= 1]
+    prepared = prepare_qubits([bits[i] for i in with_photon], [bases[i] for i in with_photon])
+    sim_ms = (time.perf_counter() - t_sim) * 1000
+
+    sent_before = channel.bytes_sent
+    channel.send_untracked({"preloss": {
+        "n": n,
+        "index": with_photon,
+        "labels": "".join(str(labels[i]) for i in with_photon),
+        "photons": [photons[i] for i in with_photon],
+        "qubits": prepared,
+    }})
+    reporter.success(f"Handed {len(with_photon)} pre-loss pulses to Eve")
+    reporter.metrics(sim_ms=round(sim_ms, 3), qubit_bytes=channel.bytes_sent - sent_before)
+    # Detected count (metric) and the per-detected arrays are set once Bob reports in step 2.
+    return _AliceTx(bits, bases, labels, sent_arr.tolist(), preloss=True)
+
+
+def _sift(channel: TranscriptChannel, tx: _AliceTx,
+          reporter: Reporter) -> tuple[list[int], list[int], list[int], Optional[list[int]]]:
+    """
+    Step 2 for Alice. Returns (sifted bits, matching indices, per-detected bits, per-detected
+    labels). The last two are in detected-pulse order and feed the decoy reveal (step 2d); labels
+    is None for the single-photon source.
+    """
     reporter.stage("sifting")
     reporter.section("Phase 2: Classical Channel (Basis Exchange)")
     reporter.info("Waiting for Bob's measurement bases...")
-    bob_bases = channel.recv_json()
+    reply = channel.recv_json()
+
+    if tx.preloss:
+        # Ground truth from Bob: he reports the global indices he detected, so Alice sifts
+        # against the pulses that actually reached him (a PNS Eve changed the detected set).
+        bob_bases = reply["bases"]
+        detected = reply["detected"]
+        if not isinstance(detected, list) or len(detected) != len(bob_bases):
+            raise ValueError("step 2: detected indices must match the bases count")
+        if any(not isinstance(g, int) or isinstance(g, bool) or not 0 <= g < len(tx.bits) for g in detected):
+            raise ValueError("step 2: detected index out of range")
+        det_bits = [tx.bits[g] for g in detected]
+        det_bases = [tx.bases[g] for g in detected]
+        det_labels: Optional[list[int]] = [tx.labels[g] for g in detected] if tx.labels is not None else None
+        reporter.metrics(detected=len(detected))
+    else:
+        bob_bases = reply
+        det_bits, det_bases, det_labels = tx.bits, tx.bases, tx.labels
     reporter.success(f"Received Bob's bases ({len(bob_bases)} entries)")
 
     reporter.section("Phase 3: Key Sifting & QBER Estimation")
-    matching = matching_basis_indices(bases, bob_bases)
-    sifted = [bits[i] for i in matching]
+    matching = matching_basis_indices(det_bases, bob_bases)
+    sifted = [det_bits[i] for i in matching]
     reporter.success(f"Sifted key: {len(sifted)} bits")
-    reporter.info(f"Sift rate: {len(sifted) / len(bits) * 100:.1f}%")
+    reporter.info(f"Sift rate: {len(sifted) / max(1, len(det_bits)) * 100:.1f}%")
     reporter.metrics(sifted_length=len(sifted))  # raw_qubits (pulses sent) was reported at step 1
 
     reporter.info("Sending matching indices to Bob...")
     channel.send_json(matching)
-    return sifted, matching
+    return sifted, matching, det_bits, det_labels
 
 
 def _estimate_qber(channel: TranscriptChannel, sifted: list[int], params: ProtocolParams, reporter: Reporter) -> tuple[float, list[int]]:
@@ -146,19 +227,25 @@ def _estimate_qber(channel: TranscriptChannel, sifted: list[int], params: Protoc
     return qber, sample_indices
 
 
-def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter) -> KeyExchangeResult:
-    """Alice's side of BB84 up to and including privacy amplification (steps 1 to 4)."""
+def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter,
+                     preloss: bool = False) -> KeyExchangeResult:
+    """
+    Alice's side of BB84 up to and including privacy amplification (steps 1 to 4).
+
+    `preloss` (eve-mode, weak-coherent source) makes Alice hand the full pre-loss pulse stream to
+    the Eve proxy and take Bob's reported detections as the ground truth for sifting and gains.
+    """
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
-    bits, bases, decoy_ctx = _transmit_qubits(channel, params, reporter)
-    sifted, matching = _sift(channel, bits, bases, reporter)
+    tx = _transmit_qubits(channel, params, reporter, preloss)
+    sifted, matching, det_bits, det_labels = _sift(channel, tx, reporter)
 
     # With a decoy source, reveal the intensity labels (step 2d) and keep only the signal
     # intensity for the key; decoy and vacuum bits are fully revealed and discarded.
     est = None
     if params.decoy_enabled:
-        key_bits, est = alice_decoy_reveal(channel, bits, matching,
-                                           decoy_ctx[0], decoy_ctx[1], params, reporter)
+        key_bits, est = alice_decoy_reveal(channel, det_bits, matching,
+                                           det_labels, tx.sent, params, reporter)
     else:
         key_bits = sifted
     qber, sample_indices = _estimate_qber(channel, key_bits, params, reporter)
@@ -197,6 +284,7 @@ def send_file(
     params: ProtocolParams = ProtocolParams(),
     auth: AuthContext | None = None,
     resume: Optional[ResumeOptions] = None,
+    eve_mode: bool = False,
 ) -> KeyExchangeResult:
     """
     Authenticate Bob, run the key exchange and, unless it aborts, stream the encrypted file.
@@ -208,15 +296,21 @@ def send_file(
     With `resume` (and auth sign or hybrid) Alice offers to continue an interrupted transfer: Bob
     says how much he holds, and only the rest is sent, under this session's new key. If the
     connection then drops, TransferInterrupted is raised. Without it the behaviour is unchanged.
+
+    `eve_mode` with a weak-coherent source (wcp/decoy) turns on the pre-loss handoff: Alice sends
+    the whole pulse stream, before channel loss, to an Eve proxy and uses Bob's reported
+    detections as ground truth. With the single-photon source it has no effect here (the Eve the
+    proxy runs is the intercept-resend one, which reads Alice's post-loss qubits unchanged).
     """
     t_start = time.perf_counter()
+    preloss = eve_mode and params.weak_coherent
     offer_resume = wants_resume(resume, auth, reporter)
     channel = TranscriptChannel(sock, "alice")
     reporter.stage("authentication")
     reporter.section("Phase 0: Authentication (Hello Exchange)")
-    handshake = alice_hello(channel, auth, reporter, params)
+    handshake = alice_hello(channel, auth, reporter, params, preloss=preloss)
 
-    kx = run_key_exchange(channel, params, reporter)
+    kx = run_key_exchange(channel, params, reporter, preloss=preloss)
     if kx.aborted:
         return kx
 
