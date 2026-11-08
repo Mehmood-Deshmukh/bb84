@@ -135,6 +135,46 @@ def _validate_reconciliation(raw: str) -> str:
 # "none" keeps the original protocol, where any error aborts at key confirmation.
 RECONCILIATION = _env("RECONCILIATION", "none", _validate_reconciliation)
 
+
+# ─────────────────────────────────────────────
+# Photon source (core/source.py; decoy numerics in core/decoy.py)
+# ─────────────────────────────────────────────
+def _validate_source(raw: str) -> str:
+    val = raw.strip().lower()
+    if val not in {"single", "decoy"}:
+        raise ValueError(f"Invalid source: {raw!r}. Allowed: single, decoy")
+    return val
+
+
+def _csv_floats(raw: str) -> tuple:
+    try:
+        return tuple(float(x) for x in raw.split(","))
+    except ValueError as exc:
+        raise ValueError(f"expected comma-separated numbers, got {raw!r}") from exc
+
+
+def validate_decoy_setup(intensities: tuple, probs: tuple) -> None:
+    """Check the (signal, decoy, vacuum) intensities and their probabilities are well formed."""
+    if len(intensities) != 3 or len(probs) != 3:
+        raise ValueError("decoy setup needs exactly 3 intensities and 3 probabilities (signal, decoy, vacuum)")
+    mu, nu, vac = intensities
+    if not (mu > nu > vac >= 0.0):
+        raise ValueError(f"intensities must be strictly decreasing with a non-negative vacuum, got {intensities}")
+    if vac != 0.0:
+        raise ValueError(f"the third intensity is the vacuum decoy and must be 0.0, got {vac}")
+    if any(p < 0 for p in probs) or abs(sum(probs) - 1.0) > 1e-9:
+        raise ValueError(f"probabilities must be non-negative and sum to 1, got {probs}")
+
+
+# "single" keeps the original single-photon-source behaviour (every existing run). "decoy"
+# switches Alice to a weak coherent source with three intensities and runs the decoy reveal
+# (wire step 2d) and the decoy asymptotic estimate (core/decoy.py).
+SOURCE = _env("SOURCE", "single", _validate_source)
+# (signal, decoy, vacuum) mean photon numbers and the probability of sending each.
+DECOY_INTENSITIES = _env("DECOY_INTENSITIES", (0.48, 0.1, 0.0), _csv_floats)
+DECOY_PROBS = _env("DECOY_PROBS", (0.7, 0.2, 0.1), _csv_floats)
+validate_decoy_setup(DECOY_INTENSITIES, DECOY_PROBS)
+
 AUTH_MODE = _env("AUTH_MODE", "hybrid", _validate_auth_mode)
 IDENTITY_DIR = _env("IDENTITY_DIR", "identity", str)
 KNOWN_PEERS_FILE = _env("KNOWN_PEERS_FILE", "known_peers.json", str)
@@ -164,11 +204,24 @@ class ProtocolParams:
     # background clicks, Bob's side the misalignment error (see channel_model.py).
     channel: ChannelParams = CHANNEL
     reconciliation: str = RECONCILIATION
+    # Photon source: "single" (default) or "decoy". The intensities/probs are the weak
+    # coherent source's (signal, decoy, vacuum) means and their probabilities; they are
+    # policy (both peers must agree) because Bob counts clicks per intensity label.
+    source: str = SOURCE
+    intensities: tuple = DECOY_INTENSITIES
+    probs: tuple = DECOY_PROBS
+
+    @property
+    def decoy_enabled(self) -> bool:
+        return self.source == "decoy"
 
     def security_policy(self) -> dict:
         """
         The values both peers must agree on. Sent in the hello (so they are bound
         into the transcript) and compared on arrival; a mismatch aborts.
+
+        intensities/probs are emitted as lists, not tuples, so a side's own policy still
+        compares equal to the peer's after the JSON round trip (JSON has no tuple).
         """
         return {
             "final_key_bits": self.final_key_bits,
@@ -177,4 +230,7 @@ class ProtocolParams:
             "qber_threshold": self.qber_threshold,
             "enforce_finite_key": self.enforce_finite_key,
             "reconciliation": self.reconciliation,
+            "source": self.source,
+            "intensities": list(self.intensities),
+            "probs": list(self.probs),
         }

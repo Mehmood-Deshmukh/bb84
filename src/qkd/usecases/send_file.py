@@ -37,6 +37,7 @@ from qkd.core.bb84_protocol import (
 from qkd.core.channel_model import ChannelParams, encode_pulses, sample_clicks
 from qkd.core.config import ProtocolParams
 from qkd.core.quantum_channel import prepare_qubits
+from qkd.core.source import sample_clicks_decoy
 from qkd.services.file_stream import describe_file, send_encrypted_file
 from qkd.services.reporting import Reporter
 from qkd.services.resume import ResumeError, chunk_boundary
@@ -45,31 +46,45 @@ from qkd.usecases.common import (
     AuthContext,
     KeyExchangeResult,
     TransferInterrupted,
+    decoy_asymptotic_verdict,
     finite_key_verdict,
     report_qber_verdict,
     report_summary,
 )
+from qkd.usecases.decoy_reveal import alice_decoy_reveal
 from qkd.usecases.handshake import alice_finished, alice_hello, session_key
 from qkd.usecases.reconcile import alice_reconcile
 from qkd.usecases.resume import ResumeOptions, alice_await_receipt, alice_negotiate, wants_resume
 
 
 def _transmit_qubits(
-    channel: TranscriptChannel, n: int, link: ChannelParams, reporter: Reporter
-) -> tuple[list[int], list[str]]:
+    channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter
+) -> tuple[list[int], list[str], Optional[tuple[list[int], list[int]]]]:
     """
     Send n pulses through the simulated channel; return Alice's bits and bases for the
-    pulses that clicked at Bob, in the order they appear in the qubit message.
+    pulses that clicked at Bob (in qubit-message order), plus the decoy context.
 
     The fibre and Bob's detector efficiency and background are emulated here, on the
-    sending side: only clicked pulses are simulated (channel_model.sample_clicks, exact in
-    distribution). A click from background alone is sent as null, since its photon never
-    arrived. Alice's protocol logic still learns which pulses clicked only from Bob's
-    bases in step 2. On the ideal channel every pulse clicks.
+    sending side: only clicked pulses are simulated (exact in distribution). A click from
+    background alone is sent as null, since its photon never arrived. Alice's protocol logic
+    still learns which pulses clicked only from Bob's bases in step 2. On the ideal channel
+    every pulse clicks.
+
+    With a decoy source each pulse also has an intensity label and a photon number; the
+    returned decoy context is (labels per clicked pulse, pulses sent per intensity). The
+    qubit message (step 1) is unchanged in either case and carries no labels (Eve reads it).
+    The returned context is None for the single-photon source.
     """
+    n, link = params.num_qubits, params.channel
     reporter.metrics(raw_qubits=n)
     t_sim = time.perf_counter()
-    clicks = sample_clicks(n, link, np.random.default_rng())
+    rng = np.random.default_rng()
+    if params.decoy_enabled:
+        clicks = sample_clicks_decoy(n, params.intensities, params.probs, link, rng)
+        decoy_ctx: Optional[tuple[list[int], list[int]]] = (clicks.label.tolist(), clicks.sent.tolist())
+    else:
+        clicks = sample_clicks(n, link, rng)
+        decoy_ctx = None
     m = len(clicks)
     reporter.info(f"Channel: {m} of {n} pulses click at Bob "
                   f"({int(clicks.signal.sum())} photons, {m - int(clicks.signal.sum())} background)")
@@ -92,10 +107,11 @@ def _transmit_qubits(
     channel.send_untracked(encode_pulses(n, clicks.index.tolist(), qubits))
     reporter.success("Qubits transmitted")
     reporter.metrics(sim_ms=round(sim_ms, 3), qubit_bytes=channel.bytes_sent - sent_before, detected=m)
-    return bits, bases
+    return bits, bases, decoy_ctx
 
 
-def _sift(channel: TranscriptChannel, bits: list[int], bases: list[str], reporter: Reporter) -> list[int]:
+def _sift(channel: TranscriptChannel, bits: list[int], bases: list[str],
+          reporter: Reporter) -> tuple[list[int], list[int]]:
     reporter.stage("sifting")
     reporter.section("Phase 2: Classical Channel (Basis Exchange)")
     reporter.info("Waiting for Bob's measurement bases...")
@@ -111,7 +127,7 @@ def _sift(channel: TranscriptChannel, bits: list[int], bases: list[str], reporte
 
     reporter.info("Sending matching indices to Bob...")
     channel.send_json(matching)
-    return sifted
+    return sifted, matching
 
 
 def _estimate_qber(channel: TranscriptChannel, sifted: list[int], params: ProtocolParams, reporter: Reporter) -> tuple[float, list[int]]:
@@ -134,21 +150,33 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     """Alice's side of BB84 up to and including privacy amplification (steps 1 to 4)."""
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
-    bits, bases = _transmit_qubits(channel, params.num_qubits, params.channel, reporter)
-    sifted = _sift(channel, bits, bases, reporter)
-    qber, sample_indices = _estimate_qber(channel, sifted, params, reporter)
+    bits, bases, decoy_ctx = _transmit_qubits(channel, params, reporter)
+    sifted, matching = _sift(channel, bits, bases, reporter)
 
-    result = dict(raw_qubits=params.num_qubits, sifted_length=len(sifted), sample_size=len(sample_indices),
+    # With a decoy source, reveal the intensity labels (step 2d) and keep only the signal
+    # intensity for the key; decoy and vacuum bits are fully revealed and discarded.
+    est = None
+    if params.decoy_enabled:
+        key_bits, est = alice_decoy_reveal(channel, bits, matching,
+                                           decoy_ctx[0], decoy_ctx[1], params, reporter)
+    else:
+        key_bits = sifted
+    qber, sample_indices = _estimate_qber(channel, key_bits, params, reporter)
+
+    result = dict(raw_qubits=params.num_qubits, sifted_length=len(key_bits), sample_size=len(sample_indices),
                   qber=qber, threshold=params.qber_threshold)
     if report_qber_verdict(qber, params.qber_threshold, len(sample_indices), reporter):
         reason = f"QBER {qber:.2%} >= threshold {params.qber_threshold:.0%}"
         return KeyExchangeResult(key=None, abort_reason=reason, **result)
 
-    kept = discard_indices(sifted, sample_indices)
+    kept = discard_indices(key_bits, sample_indices)
     leaked = 0
     if params.reconciliation == "cascade":
         leaked = alice_reconcile(channel, kept, reporter).leaked_bits
-    secure, reason = finite_key_verdict(len(kept), len(sample_indices), qber, params, reporter, leaked)
+    if params.decoy_enabled:
+        secure, reason = decoy_asymptotic_verdict(len(kept), est, params, reporter, leaked)
+    else:
+        secure, reason = finite_key_verdict(len(kept), len(sample_indices), qber, params, reporter, leaked)
     if reason is not None:
         return KeyExchangeResult(key=None, secure_bits=secure, abort_reason=reason, **result)
 

@@ -35,10 +35,12 @@ from qkd.usecases.common import (
     AuthContext,
     KeyExchangeResult,
     TransferInterrupted,
+    decoy_asymptotic_verdict,
     finite_key_verdict,
     report_qber_verdict,
     report_summary,
 )
+from qkd.usecases.decoy_reveal import bob_decoy_reveal
 from qkd.usecases.handshake import bob_finished, bob_hello, session_key
 from qkd.usecases.reconcile import bob_reconcile
 from qkd.usecases.resume import BobNegotiation, ResumeOptions, bob_negotiate, bob_send_receipt, wants_resume
@@ -87,7 +89,8 @@ def _measure(
     return n, bits, bases
 
 
-def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str], reporter: Reporter) -> list[int]:
+def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str],
+          reporter: Reporter) -> tuple[list[int], list[int]]:
     reporter.stage("sifting")
     reporter.section("Phase 2: Classical Channel (Basis Exchange)")
     reporter.info("Sending measurement bases to Alice...")
@@ -101,7 +104,7 @@ def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str
     reporter.success(f"Sifted key: {len(sifted)} bits (from {len(bits)} detected of {raw} pulses)")
     reporter.info(f"Sift rate: {len(sifted) / max(1, len(bits)) * 100:.1f}% of detected pulses")
     reporter.metrics(sifted_length=len(sifted))
-    return sifted
+    return sifted, matching
 
 
 def _answer_qber_sample(channel: TranscriptChannel, sifted: list[int], reporter: Reporter) -> tuple[float, list[int]]:
@@ -121,10 +124,18 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
     raw, bits, bases = _measure(channel, params.channel, reporter)
-    sifted = _sift(channel, raw, bits, bases, reporter)
-    qber, sample_indices = _answer_qber_sample(channel, sifted, reporter)
+    sifted, matching = _sift(channel, raw, bits, bases, reporter)
 
-    result = dict(raw_qubits=raw, sifted_length=len(sifted), sample_size=len(sample_indices),
+    # With a decoy source, read the intensity labels (step 2d) and keep only the signal
+    # intensity for the key; decoy and vacuum bits are revealed and used only for estimation.
+    est = None
+    if params.decoy_enabled:
+        key_bits, est = bob_decoy_reveal(channel, bits, matching, params, reporter)
+    else:
+        key_bits = sifted
+    qber, sample_indices = _answer_qber_sample(channel, key_bits, reporter)
+
+    result = dict(raw_qubits=raw, sifted_length=len(key_bits), sample_size=len(sample_indices),
                   qber=qber, threshold=params.qber_threshold)
     if report_qber_verdict(qber, params.qber_threshold, len(sample_indices), reporter):
         reason = f"QBER {qber:.2%} >= threshold {params.qber_threshold:.0%}"
@@ -132,14 +143,17 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
 
     # Without reconciliation the kept bits must already match Alice's; any difference
     # is caught by key confirmation (4b) or the file tag. With "cascade" Bob corrects them.
-    kept = discard_indices(sifted, sample_indices)
+    kept = discard_indices(key_bits, sample_indices)
     # Count distinct positions, so a repeated index cannot inflate the sample size
     sample_size = len(set(sample_indices))
     leaked = 0
     if params.reconciliation == "cascade":
         rec = bob_reconcile(channel, kept, qber, sample_size, reporter)
         kept, leaked = rec.bits, rec.leaked_bits
-    secure, reason = finite_key_verdict(len(kept), sample_size, qber, params, reporter, leaked)
+    if params.decoy_enabled:
+        secure, reason = decoy_asymptotic_verdict(len(kept), est, params, reporter, leaked)
+    else:
+        secure, reason = finite_key_verdict(len(kept), sample_size, qber, params, reporter, leaked)
     if reason is not None:
         return KeyExchangeResult(key=None, secure_bits=secure, abort_reason=reason, **result)
 
