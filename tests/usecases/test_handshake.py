@@ -99,7 +99,7 @@ def test_alice_hello_contents(mode: str, fields: set[str], keys, parallel) -> No
         )
     hello = msg["hello"]
     assert set(hello) == fields
-    assert (hello["v"], hello["mode"], hello["params"]) == (2, mode, POLICY)
+    assert (hello["v"], hello["mode"], hello["params"]) == (PROTOCOL_VERSION, mode, POLICY)
     if mode != "none":
         assert base64.b64decode(hello["id_pk"]) == keys["alice"][0]
         assert len(base64.b64decode(hello["nonce"])) == 32

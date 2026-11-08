@@ -496,7 +496,7 @@ classical channel; QBER still stops interference with the quantum channel.
 | Metadata encrypted | `test_file_transfer.py::test_metadata_is_not_sent_in_clear` | Filename and size fields absent from the wire |
 | Zero-chunk metadata rejected | `test_file_transfer.py::test_zero_chunk_metadata_is_rejected` | `MetadataError`; no file written |
 
-The full test suite is **536 tests** (`pytest -q`), of which `tests/invariants/`
+The full test suite is **557 tests** (`pytest -q`), of which `tests/invariants/`
 exercises the handshake, MITM, and tamper behaviours above against the real Aer
 simulator.
 

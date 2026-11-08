@@ -1,0 +1,18 @@
+# N0: does the simulated channel behave as the model says?
+# Measured click rate (detected / pulses sent) and QBER against fibre length, for the
+# two parameter sets of Ma, Qi, Zhao, Lo (2005), Table I. Each run records the model's
+# predictions (model_click_prob, model_qber) next to the measurements.
+# target_detected picks the pulse count per point so every distance gets about 20,000
+# detections (about 1500 sampled bits for the QBER). No reconciliation exists yet, so
+# runs with errors end at the file tag; the QBER is measured before that.
+name: n0_channel
+description: Measured vs modelled click rate and QBER against fibre length (GYS, KTH)
+repeats: 10
+fixed:
+  mode: none
+  payload_bytes: 1000
+  target_detected: 20000
+  QKD_ENFORCE_FINITE_KEY: 0
+grid:
+  QKD_CHANNEL_PRESET: [GYS, KTH]
+  QKD_CHANNEL_LENGTH_KM: [0, 25, 50, 75, 100, 125, 150]

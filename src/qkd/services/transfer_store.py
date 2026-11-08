@@ -8,6 +8,16 @@ Transfer state machine and storage.
        +--> rejected, failed, cancelled
 
 completed, rejected, aborted_qber, aborted_auth, failed, and cancelled are terminal.
+
+Resumable transfers add one non-terminal status, `interrupted`. It is kept apart from TRANSITIONS
+(which only holds the edges above, so `can_transition` never involves it) in RESUME_TRANSITIONS:
+
+    transferring -> interrupted -> pending (the sender resumes) -> accepted -> ... -> completed
+                        |
+                        +--> cancelled, failed
+    pending -> interrupted (a resume offer that the peer did not take)
+
+`can_move` and `path_to` know both tables.
 """
 
 from __future__ import annotations
@@ -27,7 +37,14 @@ TRANSITIONS: dict[TransferStatus, frozenset[TransferStatus]] = {
     S.accepted: frozenset({S.key_exchange, S.failed, S.cancelled}),
     S.key_exchange: frozenset({S.transferring, S.aborted_qber, S.aborted_auth, S.failed, S.cancelled}),
     S.transferring: frozenset({S.completed, S.failed, S.cancelled}),
+    S.interrupted: frozenset(),  # its exits live in RESUME_TRANSITIONS
     **{s: frozenset() for s in TERMINAL},
+}
+
+RESUME_TRANSITIONS: dict[TransferStatus, frozenset[TransferStatus]] = {
+    S.transferring: frozenset({S.interrupted}),
+    S.interrupted: frozenset({S.pending, S.cancelled, S.failed}),
+    S.pending: frozenset({S.interrupted}),
 }
 
 # Forward path used when protocol events skip intermediate statuses
@@ -50,7 +67,13 @@ class TransferExists(Exception):
 
 
 def can_transition(current: TransferStatus, target: TransferStatus) -> bool:
+    """Whether the base state machine allows current -> target (never involves `interrupted`)."""
     return target in TRANSITIONS[current]
+
+
+def can_move(current: TransferStatus, target: TransferStatus) -> bool:
+    """can_transition, plus the edges of resumable transfers."""
+    return can_transition(current, target) or target in RESUME_TRANSITIONS.get(current, frozenset())
 
 
 def path_to(current: TransferStatus, target: TransferStatus) -> list[TransferStatus]:
@@ -59,13 +82,13 @@ def path_to(current: TransferStatus, target: TransferStatus) -> list[TransferSta
     further along it (e.g. accepted -> transferring goes through key_exchange).
     Raises InvalidTransition when target is not reachable.
     """
-    if can_transition(current, target):
+    if can_move(current, target):
         return [target]
     if current in _HAPPY_PATH:
         steps: list[TransferStatus] = []
         for status in _HAPPY_PATH[_HAPPY_PATH.index(current) + 1:]:
             steps.append(status)
-            if can_transition(status, target):
+            if can_move(status, target):
                 return steps + [target]
     raise InvalidTransition(current, target)
 

@@ -68,13 +68,73 @@ def forward_message(src: socket.socket, dst: socket.socket) -> bytes:
     return data
 
 
+def relay_until_closed(a: socket.socket, b: socket.socket) -> None:
+    """
+    Copy bytes both ways between a and b until both directions are closed.
+
+    For in-path proxies (Eve) once they stop parsing: it does not need to know how many
+    messages follow or in which direction, which varies with reconciliation rounds. When
+    one side closes, its peer's sending direction is shut down too, as a direct
+    connection would see.
+    """
+    import selectors
+
+    open_from = {a: b, b: a}
+    with selectors.DefaultSelector() as sel:
+        for sock in open_from:
+            sel.register(sock, selectors.EVENT_READ)
+        while open_from:
+            for key, _ in sel.select():
+                src = key.fileobj
+                dst = open_from.get(src)
+                if dst is None:
+                    continue
+                try:
+                    data = src.recv(65536)
+                except (ConnectionError, OSError):
+                    data = b""
+                if data:
+                    try:
+                        dst.sendall(data)
+                        continue
+                    except (ConnectionError, OSError):
+                        pass
+                # src closed (or dst is gone): stop this direction
+                sel.unregister(src)
+                del open_from[src]
+                try:
+                    dst.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+
+
+def no_delay(sock: socket.socket) -> socket.socket:
+    """
+    Turn off Nagle's algorithm on a protocol socket and return it.
+
+    Every message already goes out in one write, so Nagle only adds delay: when one
+    side sends two messages in a row (Alice's qber, then her salt), the second waits
+    for the ACK of the first, which the peer delays by up to about 40 ms because it
+    has nothing to send back. Measured before this: about 40 ms per run, all of it
+    charged to the key confirmation stage.
+    """
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    return sock
+
+
+def accept(server: socket.socket) -> tuple[socket.socket, Any]:
+    """server.accept() with TCP_NODELAY set on the new connection."""
+    conn, addr = server.accept()
+    return no_delay(conn), addr
+
+
 def connect_with_retry(host: str, port: int, attempts: int = 15, delay: float = 1.0) -> socket.socket:
-    """Connect to host:port, retrying while the listener is not up yet."""
+    """Connect to host:port, retrying while the listener is not up yet. TCP_NODELAY is set."""
     for attempt in range(attempts):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.connect((host, port))
-            return sock
+            return no_delay(sock)
         except ConnectionRefusedError:
             sock.close()
             if attempt == attempts - 1:

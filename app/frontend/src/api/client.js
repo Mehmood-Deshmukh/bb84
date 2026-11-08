@@ -124,6 +124,13 @@ export function createTransfer(file, peerId) {
 export const respondToTransfer = (id, status) =>
   request(`/transfers/${encodeURIComponent(id)}`, { method: 'PATCH', json: { status } })
 
+/**
+ * Resume an interrupted outgoing transfer. The receiver is asked again and answers like for any offer.
+ * @param {string} id
+ * @returns {Promise<Transfer>}
+ */
+export const resumeTransfer = (id) => request(`/transfers/${encodeURIComponent(id)}/resume`, { method: 'POST' })
+
 /** @param {string} id @returns {Promise<Transfer>} */
 export const cancelTransfer = (id) => request(`/transfers/${encodeURIComponent(id)}`, { method: 'DELETE' })
 

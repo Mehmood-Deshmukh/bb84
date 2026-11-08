@@ -1,11 +1,24 @@
 import { useState } from 'react'
 import { TERMINAL_STATUSES } from '../api/types'
-import { STAGE_LABEL, formatBytes } from '../lib/format'
+import { RESTART_REASON, STAGE_LABEL, formatBytes } from '../lib/format'
 import LiveLog from './LiveLog'
 import ProtocolView from './ProtocolView'
 import StatusLabel from './StatusLabel'
 
-function Actions({ transfer, onRespond, onCancel, busy }) {
+function Actions({ transfer, onRespond, onResume, onCancel, busy }) {
+  if (transfer.status === 'interrupted') {
+    return (
+      <div className="flex flex-wrap gap-2">
+        {transfer.direction === 'outgoing' ? (
+          <button type="button" disabled={busy} onClick={() => onResume(transfer.id)}
+            className="rounded-sm bg-accent px-4 py-2 font-medium text-on-accent hover:bg-accent/85">
+            Resume transfer
+          </button>
+        ) : null}
+        <CancelButton transfer={transfer} onCancel={onCancel} busy={busy} label="Discard transfer" />
+      </div>
+    )
+  }
   if (transfer.direction === 'incoming' && transfer.status === 'pending') {
     return (
       <div className="flex flex-wrap gap-2">
@@ -25,19 +38,23 @@ function Actions({ transfer, onRespond, onCancel, busy }) {
 }
 
 /** Cancelling stops both nodes and cannot be undone, so it takes a second click. */
-function CancelButton({ transfer, onCancel, busy }) {
+function CancelButton({ transfer, onCancel, busy, label = 'Cancel transfer' }) {
   const [confirming, setConfirming] = useState(false)
   if (!confirming) {
     return (
       <button type="button" disabled={busy} onClick={() => setConfirming(true)}
         className="rounded-sm border border-rule px-4 py-2 font-medium hover:border-danger hover:text-danger">
-        Cancel transfer
+        {label}
       </button>
     )
   }
   return (
     <div role="group" aria-label="Confirm cancellation" className="flex flex-wrap items-center gap-2">
-      <span className="text-small">Stop this transfer on both nodes?</span>
+      <span className="text-small">
+        {transfer.status === 'interrupted'
+          ? 'Discard this transfer and the data already received, on both nodes?'
+          : 'Stop this transfer on both nodes?'}
+      </span>
       <button type="button" autoFocus disabled={busy} onClick={() => onCancel(transfer.id)}
         className="rounded-sm bg-danger px-4 py-2 font-medium text-paper hover:bg-danger/85">
         Stop transfer
@@ -51,10 +68,33 @@ function CancelButton({ transfer, onCancel, busy }) {
 }
 
 function waitingNote(transfer) {
+  if (transfer.status === 'interrupted') {
+    const done = transfer.progress ? ` after ${formatBytes(transfer.progress.bytes_done)} of ${formatBytes(transfer.progress.total_bytes)}` : ''
+    return transfer.direction === 'outgoing'
+      ? `The connection stopped${done}. Resuming runs a new key exchange and sends only what ${transfer.peer.name} has not yet verified.`
+      : `The connection stopped${done}. The data already verified is kept; ${transfer.peer.name} can resume the transfer.`
+  }
   if (transfer.status !== 'pending') return null
+  if ((transfer.attempt ?? 1) > 1) {
+    return transfer.direction === 'outgoing'
+      ? `Waiting for ${transfer.peer.name} to accept the resume. Nothing has been sent yet in this attempt.`
+      : `${transfer.peer.name} wants to resume sending this file. Nothing is received until you accept.`
+  }
   return transfer.direction === 'outgoing'
     ? `Waiting for ${transfer.peer.name} to accept. Nothing has been sent yet.`
     : `${transfer.peer.name} wants to send you this file. Nothing is received until you accept.`
+}
+
+/** What a resumed attempt did differently: continued after verified data, or had to start over. */
+function resumeNote(transfer) {
+  if (transfer.resume_restart_reason) {
+    const why = RESTART_REASON[transfer.resume_restart_reason] ?? transfer.resume_restart_reason
+    return `Sent again from the start: ${why}.`
+  }
+  if (transfer.resumed_from_bytes > 0) {
+    return `Resumed: the first ${formatBytes(transfer.resumed_from_bytes)} were already verified and were not sent again (attempt ${transfer.attempt ?? 2}).`
+  }
+  return null
 }
 
 /** Prominent result panel displayed when a transfer aborts due to authentication / impersonation failure. */
@@ -114,7 +154,7 @@ function ImpersonationAlert({ transfer }) {
   )
 }
 
-export default function TransferPanel({ transfer, events, onRespond, onCancel, busy, actionError }) {
+export default function TransferPanel({ transfer, events, onRespond, onResume, onCancel, busy, actionError }) {
   if (!transfer) {
     return (
       <div className="max-w-prose space-y-2 py-8">
@@ -129,6 +169,7 @@ export default function TransferPanel({ transfer, events, onRespond, onCancel, b
 
   const outgoing = transfer.direction === 'outgoing'
   const note = waitingNote(transfer)
+  const resumed = resumeNote(transfer)
 
   return (
     <article aria-labelledby="transfer-title" className="space-y-8">
@@ -141,17 +182,21 @@ export default function TransferPanel({ transfer, events, onRespond, onCancel, b
               <span className="font-mono text-small">({transfer.peer.host})</span>, {formatBytes(transfer.file_size)}
             </p>
           </div>
-          <Actions key={transfer.id} transfer={transfer} onRespond={onRespond} onCancel={onCancel} busy={busy} />
+          <Actions key={transfer.id} transfer={transfer} onRespond={onRespond} onResume={onResume} onCancel={onCancel} busy={busy} />
         </div>
         <p aria-live="polite" className="font-medium">
           <StatusLabel status={transfer.status} direction={transfer.direction} />
         </p>
         {note ? <p className="text-ink-2">{note}</p> : null}
+        {resumed ? <p className="text-small text-ink-2">{resumed}</p> : null}
         {transfer.status === 'aborted_auth' ? (
           <ImpersonationAlert transfer={transfer} />
         ) : null}
-        {transfer.error && !['cancelled', 'rejected', 'aborted_qber', 'aborted_auth'].includes(transfer.status) ? (
+        {transfer.error && !['cancelled', 'rejected', 'aborted_qber', 'aborted_auth', 'interrupted'].includes(transfer.status) ? (
           <p className="text-small text-danger">{transfer.error}</p>
+        ) : null}
+        {transfer.status === 'interrupted' && transfer.error ? (
+          <p className="text-small text-ink-2">Reason: <span className="font-mono break-all">{transfer.error}</span></p>
         ) : null}
         {transfer.output_path ? (
           <p className="text-small text-ink-2">

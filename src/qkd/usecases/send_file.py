@@ -3,19 +3,27 @@ Alice's workflow: BB84 key exchange, then chunked AES-256-GCM file streaming.
 
 Message order on the socket (must match receive_file.py and eavesdrop_demo.py):
   0a -> {"hello"}              0b <- {"hello"}          (both abort on mode mismatch)
-  1  -> qubits (QASM list, untracked)
+  1  -> {"n","index","qubits"}: the pulses that clicked at Bob (untracked; channel_model.encode_pulses)
   2  <- Bob's bases            -> matching indices
   3  -> {"sample_indices"}     <- {"sample_bits"}       -> {"qber"}   (both abort if qber >= threshold)
-     both abort if the finite-key secure length is below final_key_bits (no message)
+  3c (reconciliation "cascade" only) -> {"cascade_seed"}, then <- {"cascade"} / -> {"parities"} rounds
+     until Bob sends an empty {"cascade": []} (usecases/reconcile.py)
+     both abort if the finite-key secure length (charged for the revealed parities) is below
+     final_key_bits (no message)
   4  -> {"salt"} (Toeplitz seed) T = transcript digest
   4b <- {"finished","confirm"} -> {"finished","confirm"} (untracked; sign and hybrid only)
+  4c <- {"resume_request"}     4d -> {"resume_grant"}   (only if resume is on and both finished carried "resume": 1)
   5  -> encrypted file metadata, then one message per chunk (metadata bound as GCM AAD)
+  6  <- {"resume_done"}        (resume only: Bob's sealed receipt after the whole file verified)
 """
 
 from __future__ import annotations
 
 import socket
 import time
+from typing import Optional
+
+import numpy as np
 
 from qkd.core.bb84_protocol import (
     choose_sample_indices,
@@ -26,38 +34,64 @@ from qkd.core.bb84_protocol import (
     matching_basis_indices,
     privacy_amplification,
 )
+from qkd.core.channel_model import ChannelParams, encode_pulses, sample_clicks
 from qkd.core.config import ProtocolParams
 from qkd.core.quantum_channel import prepare_qubits
 from qkd.services.file_stream import describe_file, send_encrypted_file
 from qkd.services.reporting import Reporter
+from qkd.services.resume import ResumeError, chunk_boundary
 from qkd.services.transcript import TranscriptChannel
 from qkd.usecases.common import (
     AuthContext,
     KeyExchangeResult,
+    TransferInterrupted,
     finite_key_verdict,
     report_qber_verdict,
     report_summary,
 )
 from qkd.usecases.handshake import alice_finished, alice_hello, session_key
+from qkd.usecases.reconcile import alice_reconcile
+from qkd.usecases.resume import ResumeOptions, alice_await_receipt, alice_negotiate, wants_resume
 
 
-def _transmit_qubits(channel: TranscriptChannel, n: int, reporter: Reporter) -> tuple[list[int], list[str]]:
+def _transmit_qubits(
+    channel: TranscriptChannel, n: int, link: ChannelParams, reporter: Reporter
+) -> tuple[list[int], list[str]]:
+    """
+    Send n pulses through the simulated channel; return Alice's bits and bases for the
+    pulses that clicked at Bob, in the order they appear in the qubit message.
+
+    The fibre and Bob's detector efficiency and background are emulated here, on the
+    sending side: only clicked pulses are simulated (channel_model.sample_clicks, exact in
+    distribution). A click from background alone is sent as null, since its photon never
+    arrived. Alice's protocol logic still learns which pulses clicked only from Bob's
+    bases in step 2. On the ideal channel every pulse clicks.
+    """
     reporter.metrics(raw_qubits=n)
-    reporter.info(f"Generating {n} random bits and bases...")
-    t0 = time.perf_counter()
-    bits = generate_random_bits(n)
-    bases = generate_random_bases(n)
-    reporter.info(f"Generated in {time.perf_counter() - t0:.4f}s")
+    t_sim = time.perf_counter()
+    clicks = sample_clicks(n, link, np.random.default_rng())
+    m = len(clicks)
+    reporter.info(f"Channel: {m} of {n} pulses click at Bob "
+                  f"({int(clicks.signal.sum())} photons, {m - int(clicks.signal.sum())} background)")
+    reporter.info(f"Generating {m} random bits and bases...")
+    bits = generate_random_bits(m)
+    bases = generate_random_bases(m)
 
     reporter.info("Preparing qubits (encoding bits in quantum states)...")
-    t0 = time.perf_counter()
-    qasm_strings = prepare_qubits(bits, bases)
-    reporter.success(f"Prepared {n} qubits in {time.perf_counter() - t0:.4f}s")
+    photons = [i for i in range(m) if clicks.signal[i]]
+    prepared = prepare_qubits([bits[i] for i in photons], [bases[i] for i in photons])
+    qubits: list[str | None] = [None] * m
+    for i, q in zip(photons, prepared):
+        qubits[i] = q
+    reporter.success(f"Prepared {len(photons)} qubits")
+    # Time spent in the simulator (channel, QRNG, state preparation), kept apart from protocol cost
+    sim_ms = (time.perf_counter() - t_sim) * 1000
 
-    # Qubits are transmitted noiselessly in this simplified protocol
     reporter.info("Sending qubits over quantum channel...")
-    channel.send_untracked(qasm_strings)
+    sent_before = channel.bytes_sent
+    channel.send_untracked(encode_pulses(n, clicks.index.tolist(), qubits))
     reporter.success("Qubits transmitted")
+    reporter.metrics(sim_ms=round(sim_ms, 3), qubit_bytes=channel.bytes_sent - sent_before, detected=m)
     return bits, bases
 
 
@@ -73,7 +107,7 @@ def _sift(channel: TranscriptChannel, bits: list[int], bases: list[str], reporte
     sifted = [bits[i] for i in matching]
     reporter.success(f"Sifted key: {len(sifted)} bits")
     reporter.info(f"Sift rate: {len(sifted) / len(bits) * 100:.1f}%")
-    reporter.metrics(raw_qubits=len(bits), sifted_length=len(sifted))
+    reporter.metrics(sifted_length=len(sifted))  # raw_qubits (pulses sent) was reported at step 1
 
     reporter.info("Sending matching indices to Bob...")
     channel.send_json(matching)
@@ -100,7 +134,7 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     """Alice's side of BB84 up to and including privacy amplification (steps 1 to 4)."""
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
-    bits, bases = _transmit_qubits(channel, params.num_qubits, reporter)
+    bits, bases = _transmit_qubits(channel, params.num_qubits, params.channel, reporter)
     sifted = _sift(channel, bits, bases, reporter)
     qber, sample_indices = _estimate_qber(channel, sifted, params, reporter)
 
@@ -111,7 +145,10 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
         return KeyExchangeResult(key=None, abort_reason=reason, **result)
 
     kept = discard_indices(sifted, sample_indices)
-    secure, reason = finite_key_verdict(len(kept), len(sample_indices), qber, params, reporter)
+    leaked = 0
+    if params.reconciliation == "cascade":
+        leaked = alice_reconcile(channel, kept, reporter).leaked_bits
+    secure, reason = finite_key_verdict(len(kept), len(sample_indices), qber, params, reporter, leaked)
     if reason is not None:
         return KeyExchangeResult(key=None, secure_bits=secure, abort_reason=reason, **result)
 
@@ -131,6 +168,7 @@ def send_file(
     reporter: Reporter,
     params: ProtocolParams = ProtocolParams(),
     auth: AuthContext | None = None,
+    resume: Optional[ResumeOptions] = None,
 ) -> KeyExchangeResult:
     """
     Authenticate Bob, run the key exchange and, unless it aborts, stream the encrypted file.
@@ -138,8 +176,13 @@ def send_file(
     Raises PeerAuthError if the hello or finished signature check fails (no qubits
     are sent unless Bob's identity passed auth.verifier), and KeyConfirmationError
     if Bob's signature is valid but his key differs from Alice's.
+
+    With `resume` (and auth sign or hybrid) Alice offers to continue an interrupted transfer: Bob
+    says how much he holds, and only the rest is sent, under this session's new key. If the
+    connection then drops, TransferInterrupted is raised. Without it the behaviour is unchanged.
     """
     t_start = time.perf_counter()
+    offer_resume = wants_resume(resume, auth, reporter)
     channel = TranscriptChannel(sock, "alice")
     reporter.stage("authentication")
     reporter.section("Phase 0: Authentication (Hello Exchange)")
@@ -151,24 +194,53 @@ def send_file(
 
     transcript_hash = channel.digest()
     key = session_key(kx.key, handshake, transcript_hash)
+    negotiate = False
     if handshake.signed:
         reporter.stage("key_confirmation")
         reporter.section("Key Confirmation (Signed Transcript + Key Tag)")
-        alice_finished(channel, auth, handshake, transcript_hash, key, reporter)
+        peer_resume = alice_finished(channel, auth, handshake, transcript_hash, key, reporter, offer_resume)
+        negotiate = offer_resume and peer_resume
+        if offer_resume and not peer_resume:
+            reporter.warning("The receiver does not offer resume. Sending the whole file.")
 
+    offset = 0
+    try:
+        if negotiate:
+            offset, _ = alice_negotiate(channel, key, transcript_hash, auth, resume, filepath, params.chunk_size, reporter)
+    except ResumeError as exc:
+        if exc.resumable:
+            raise TransferInterrupted(exc.reason) from exc
+        raise
+    except (ConnectionError, OSError) as exc:
+        raise TransferInterrupted(f"connection lost during resume negotiation: {exc}") from exc
+
+    # Everything that went through the transcript channel: hellos, qubits, BB84, finished
+    reporter.metrics(channel_bytes=channel.bytes_sent + channel.bytes_received)
     reporter.stage("file_transfer")
     reporter.section("Phase 5: Secure File Transfer (Chunked Streaming)")
-    meta = describe_file(filepath, params.chunk_size)
+    meta = describe_file(filepath, params.chunk_size, with_sha256=negotiate, resume_offset=offset if negotiate else None)
     reporter.info(f"File: {meta.filename} ({meta.total_size} bytes)")
-    reporter.info(f"Streaming as {meta.num_chunks} chunk(s) of {meta.chunk_size // 1024} KB")
-    reporter.progress(0, meta.num_chunks, 0, meta.total_size)
+    if negotiate:
+        reporter.metrics(resumed_from_bytes=chunk_boundary(offset, meta.chunk_size, meta.total_size), bytes_total=meta.total_size)
+    reporter.info(f"Streaming as {meta.num_chunks} chunk(s) of {meta.chunk_size // 1024} KB"
+                  + (f", from chunk {offset}" if offset else ""))
+    reporter.progress(offset, meta.num_chunks, chunk_boundary(offset, meta.chunk_size, meta.total_size), meta.total_size)
 
     def on_progress(done: int, total: int, sent: int) -> None:
         reporter.progress(done, total, sent, meta.total_size)
         if done % 100 == 0 or done == total:
             reporter.info(f"  Sent chunk {done}/{total} ({done / total * 100:.1f}%)")
 
-    send_encrypted_file(sock, filepath, key, meta, on_progress)
+    try:
+        file_wire_bytes = send_encrypted_file(sock, filepath, key, meta, on_progress, start_chunk=offset)
+        reporter.metrics(file_wire_bytes=file_wire_bytes)
+        if negotiate:
+            reporter.info("Waiting for the receiver to confirm the whole file...")
+            alice_await_receipt(channel, key, transcript_hash, meta.sha256, meta.total_size)
+    except (ConnectionError, OSError) as exc:
+        if negotiate:
+            raise TransferInterrupted(f"connection lost before the receiver confirmed the file: {exc}") from exc
+        raise
     reporter.success(f"Encrypted file '{meta.filename}' streamed to Bob ({meta.num_chunks} chunks)")
 
     reporter.section("Transfer Complete")

@@ -1,7 +1,7 @@
 import StatusLabel from './StatusLabel'
 
 /** Transfers known to this node since it started. Selecting one shows it in the transfer panel. */
-export default function TransferList({ transfers, selectedId, onSelect }) {
+export default function TransferList({ transfers, selectedId, onSelect, onResume, busy }) {
   return (
     <section aria-labelledby="transfers-heading" className="space-y-3">
       <h2 id="transfers-heading" className="text-section font-semibold">Transfers</h2>
@@ -27,6 +27,12 @@ export default function TransferList({ transfers, selectedId, onSelect }) {
                   </span>
                   <StatusLabel status={t.status} direction={t.direction} className="text-small" />
                 </button>
+                {t.status === 'interrupted' && t.direction === 'outgoing' ? (
+                  <button type="button" disabled={busy} onClick={() => onResume(t.id)}
+                    className="mb-2.5 ml-3 rounded-sm border border-rule px-3 py-1 text-small font-medium hover:border-accent hover:text-accent">
+                    Resume
+                  </button>
+                ) : null}
               </li>
             )
           })}

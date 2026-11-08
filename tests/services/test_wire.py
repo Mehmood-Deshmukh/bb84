@@ -84,3 +84,42 @@ def test_connect_with_retry_gives_up() -> None:
         port = server.getsockname()[1]
     with pytest.raises(ConnectionRefusedError):
         connect_with_retry("127.0.0.1", port, attempts=2, delay=0.01)
+
+
+def test_protocol_sockets_disable_nagle() -> None:
+    """Both ends of a protocol connection have TCP_NODELAY set (see wire.no_delay)."""
+    import socket as _socket
+
+    from qkd.services.wire import accept, connect_with_retry, listen
+
+    with listen(0, "127.0.0.1") as server:
+        port = server.getsockname()[1]
+        client = connect_with_retry("127.0.0.1", port, attempts=1)
+        conn, _ = accept(server)
+        with client, conn:
+            for sock in (client, conn):
+                assert sock.getsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY) != 0
+
+
+def test_relay_until_closed_copies_both_ways_and_ends() -> None:
+    import socket as _socket
+    import threading
+
+    from qkd.services.wire import recv_bytes, relay_until_closed, send_bytes
+
+    alice, relay_a = _socket.socketpair()
+    relay_b, bob = _socket.socketpair()
+    t = threading.Thread(target=relay_until_closed, args=(relay_a, relay_b))
+    t.start()
+    with alice, bob:
+        send_bytes(alice, b"to bob")
+        assert recv_bytes(bob) == b"to bob"
+        send_bytes(bob, b"to alice")
+        assert recv_bytes(alice) == b"to alice"
+        alice.shutdown(_socket.SHUT_WR)
+        assert bob.recv(1) == b""  # Alice's close reaches Bob
+        bob.shutdown(_socket.SHUT_WR)
+        t.join(5)
+    assert not t.is_alive()
+    relay_a.close()
+    relay_b.close()

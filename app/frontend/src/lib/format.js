@@ -40,12 +40,20 @@ export const STATUS_LABEL = {
   accepted: 'Starting',
   key_exchange: 'Exchanging key',
   transferring: 'Sending file',
+  interrupted: 'Interrupted, can be resumed',
   completed: 'Completed',
   rejected: 'Declined',
   aborted_qber: 'Aborted: QBER too high',
   aborted_auth: 'Aborted: Impersonation detected',
   failed: 'Failed',
   cancelled: 'Cancelled',
+}
+
+/** Why a resumed transfer started again from the beginning (resume_restart_reason). @type {Record<string, string>} */
+export const RESTART_REASON = {
+  source_changed: 'the file changed since the interruption',
+  file_changed: 'the file has a different name or size than before',
+  chunk_size_changed: 'the chunk size changed',
 }
 
 /** @type {Record<Stage, string>} */
@@ -55,6 +63,7 @@ export const STAGE_LABEL = {
   quantum_transmission: 'Send qubits',
   sifting: 'Sift bases',
   qber_estimation: 'Estimate QBER',
+  reconciliation: 'Correct errors',
   privacy_amplification: 'Amplify privacy',
   key_confirmation: 'Confirm key',
   file_transfer: 'Stream file',

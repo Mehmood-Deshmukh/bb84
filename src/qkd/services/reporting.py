@@ -43,6 +43,7 @@ OUTCOME_COMPLETED = "completed"
 OUTCOME_ABORTED_QBER = "aborted_qber"
 OUTCOME_ABORTED_AUTH = "aborted_auth"
 OUTCOME_FAILED = "failed"
+OUTCOME_INTERRUPTED = "interrupted"  # resumable transfer stopped after key confirmation
 
 
 class Reporter(Protocol):

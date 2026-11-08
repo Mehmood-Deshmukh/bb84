@@ -33,6 +33,13 @@ function StatusGlyph({ status }) {
       </svg>
     )
   }
+  if (status === 'interrupted') {
+    return (
+      <svg {...common} className="shrink-0 text-accent">
+        <path d="M3 1.5v7M7 1.5v7" stroke="currentColor" strokeWidth="2" />
+      </svg>
+    )
+  }
   if (ACTIVE_STATUSES.has(status)) {
     return (
       <svg {...common} className="shrink-0 text-accent">

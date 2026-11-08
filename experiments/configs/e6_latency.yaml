@@ -1,0 +1,15 @@
+# E6: how network latency changes the cost of each authentication mode.
+# scripts/latency_proxy.py sits between Alice and Bob and delays every byte by
+# rtt_ms / 2 in each direction (no root, only this connection, re-set per run so the
+# shuffled order holds). rtt_ms 0 is the proxy with no delay, the baseline for the
+# proxy's own overhead. Fitting protocol time against rtt_ms per mode gives the number
+# of round trips each mode needs; sign and hybrid should need about one more (the
+# finished exchange). Payload is fixed and small so file size plays no part.
+name: e6_latency
+description: Protocol time vs added round-trip time, by authentication mode
+repeats: 30
+fixed:
+  payload_bytes: 1024
+grid:
+  mode: [none, sign, hybrid]
+  rtt_ms: [0, 1, 10, 50, 100]

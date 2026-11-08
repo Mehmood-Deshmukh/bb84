@@ -1,0 +1,18 @@
+# E7: tamper fuzzing. One wire message per trial is changed at random (see
+# scripts/fuzz_tamper.py for the mutation kinds and outcome labels), and the trial
+# records what caught it. The claim to support: no change to any message ever makes
+# Bob accept a file that differs from Alice's (delivered_corrupt = 0), and in hybrid
+# mode every change to a classical message is caught before file data moves.
+# none mode is the contrast: what authentication adds.
+# Small N with the finite-key gate off keeps each trial fast (it is not a key-length
+# experiment); 3000 bytes in 1024-byte chunks gives 3 chunks to tamper with.
+name: e7_fuzz
+description: Which check catches a random change to each wire message, none vs hybrid
+repeats: 30
+modes: [none, hybrid]
+mutations: [semantic, bitflip]
+num_qubits: 256
+enforce_finite_key: false
+payload_bytes: 3000
+chunk_size: 1024
+num_chunks: 3

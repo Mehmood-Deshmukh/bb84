@@ -18,6 +18,7 @@ class TransferStatus(str, Enum):
     accepted = "accepted"
     key_exchange = "key_exchange"
     transferring = "transferring"
+    interrupted = "interrupted"  # resumable: stopped after key confirmation; the sender can POST .../resume
     completed = "completed"
     rejected = "rejected"
     aborted_qber = "aborted_qber"
@@ -71,6 +72,10 @@ class Transfer(BaseModel):
     peer_trust: Optional[str] = None
     handshake_ms: Optional[float] = None
     auth_overhead_bytes: Optional[int] = None
+    attempt: int = Field(1, ge=1, description="1 for the first try; each resume of an interrupted transfer adds one")
+    resumed_from_bytes: Optional[int] = Field(None, description="Bytes already verified on the receiver when this attempt started")
+    bytes_total: Optional[int] = Field(None, description="Size of the file being transferred")
+    resume_restart_reason: Optional[str] = Field(None, description="Why a resume started from byte 0 (source_changed, file_changed, chunk_size_changed)")
 
 
 class TransferList(BaseModel):
@@ -85,6 +90,10 @@ class IncomingTransferRequest(BaseModel):
     file_size: int = Field(ge=0)
     sender: PeerRef
     sender_fingerprint: Optional[str] = None
+    resume_transfer_id: Optional[str] = Field(
+        None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$",
+        description="Set when this offer continues an interrupted transfer; must equal `id`",
+    )
 
 
 class TransferPatch(BaseModel):
@@ -142,6 +151,8 @@ class HistoryEntry(BaseModel):
     auth_mode: Optional[str] = None
     peer_fingerprint: Optional[str] = None
     peer_trust: Optional[str] = None
+    resumed_from_bytes: Optional[int] = None
+    bytes_total: Optional[int] = None
 
 
 class HistoryList(BaseModel):
