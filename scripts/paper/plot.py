@@ -54,6 +54,36 @@ def fig_e1():
     _save(fig, "e1_detection")
 
 
+def fig_e2_stopping_check():
+    p = RESULTS / "e2_summary.csv"
+    if not p.exists():
+        return
+    rows = _read(p)
+    layers = [("cnt_threshold", "QBER threshold", "#c00000"),
+              ("cnt_finite_key", "finite-key bound", "#ed7d31"),
+              ("cnt_tag", "confirmation tag", "#1f4e79"),
+              ("cnt_gcm", "GCM tag", "#2e7d32")]
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    for ax, mode in zip(axes, ("hybrid", "none")):
+        rs = sorted([r for r in rows if r["mode"] == mode], key=lambda r: float(r["f"]))
+        fs = [float(r["f"]) for r in rs]
+        x = list(range(len(fs)))
+        bottom = [0.0] * len(rs)
+        for key, label, color in layers:
+            vals = [int(r.get(key, 0) or 0) for r in rs]
+            if sum(vals) == 0:
+                continue
+            ax.bar(x, vals, bottom=bottom, label=label, color=color)
+            bottom = [b + v for b, v in zip(bottom, vals)]
+        ax.set_xticks(x); ax.set_xticklabels([f"{f:g}" for f in fs], rotation=45, fontsize=7)
+        ax.set_title(f"{mode}"); ax.set_xlabel("Eve fraction f")
+        ax.grid(True, axis="y", alpha=0.3)
+    axes[0].set_ylabel("runs (of 30) stopped by each check")
+    axes[1].legend(fontsize=8, loc="upper right")
+    fig.suptitle("E2: which check stops a partial-Eve run, by mode and f (N=8192)")
+    _save(fig, "e2_stopping_check")
+
+
 def fig_e3_keylen():
     p = RESULTS / "e3_keylen_vs_qber.csv"
     if not p.exists():
@@ -107,7 +137,7 @@ def fig_e6():
 
 
 def main():
-    fig_e1(); fig_e3_keylen(); fig_e5(); fig_e6()
+    fig_e1(); fig_e2_stopping_check(); fig_e3_keylen(); fig_e5(); fig_e6()
     return 0
 
 

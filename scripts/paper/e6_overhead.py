@@ -38,6 +38,7 @@ from qkd.core.config import ProtocolParams
 from qkd.core.crypto_utils import derive_session_key, key_schedule
 from qkd.core.finite_key import secure_key_length
 from qkd.core.bb84_protocol import generate_random_bases, generate_random_bits, privacy_amplification
+from qkd.core.channel_model import encode_pulses
 from qkd.core.quantum_channel import prepare_qubits
 from qkd.services import wire
 from qkd.services.reporting import NullReporter
@@ -92,9 +93,15 @@ def none_hello_bytes(aid, bid):
 
 
 def qasm_sizes():
+    """Framed size of the step-1 qubit message as actually sent (channel_model.encode_pulses).
+
+    On the ideal channel every pulse clicks in order, so index=None and the message is
+    {"n", "index": None, "qubits": [N QASM strings]}.
+    """
     rows = []
     for n in (512, 1024, 2048, 4096, 8192):
-        payload = wire.encode_json(prepare_qubits(generate_random_bits(n), generate_random_bases(n)))
+        qubits = prepare_qubits(generate_random_bits(n), generate_random_bases(n))
+        payload = wire.encode_json(encode_pulses(n, None, qubits))
         rows.append({"qubits": n, "framed_bytes": len(payload) + 4, "bytes_per_qubit": round((len(payload) + 4) / n, 2)})
     return rows
 

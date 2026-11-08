@@ -1,15 +1,16 @@
 """
 E1 — Eve detection vs qubit count N and attack fraction f (current protocol).
 
-In-process honest hybrid flow with a partial-f intercept-resend Eve (scripts/paper/eve.py)
-between Alice and Bob; full protocol with the finite-key gate ON. Per run we record the
-sifted count n, the sample size k, the observed QBER Q, the finite-key secure length l,
-and WHICH check stopped the run (threshold | finite_key | tag | signature | gcm | none),
-detected in-process. The runner collapses threshold/finite_key/tag into 'aborted_qber'.
+In-process honest hybrid flow with a partial-f intercept-resend Eve between Alice and Bob;
+Eve attacks a fraction f of the qubits via run_eavesdrop(..., fraction=f) (native in
+quantum_channel.eve_intercept_resend as of origin/main). Full protocol with the finite-key
+gate ON. Per run we record the sifted count n, the sample size k, the observed QBER Q, the
+finite-key secure length l, and WHICH check stopped the run
+(threshold | finite_key | tag | signature | gcm | none), detected in-process. The runner
+collapses threshold/finite_key/tag into 'aborted_qber'.
 
-Before E1 it runs two sanity checks on the partial-f wrapper:
-  (a) f=1.0: the wrapper's sifted error rate matches the real eve_intercept_resend's,
-      30 rounds each at N=2048, compared via 95% Wilson intervals (must overlap);
+Before E1 it runs two sanity checks on the native partial-f Eve (channel level):
+  (a) f=1.0: the sifted error rate is ~25% (full intercept-resend), 30 rounds at N=2048;
   (b) f=0.0: the sifted error rate is exactly 0.
 
 Usage: python scripts/paper/e1_detection.py [--smoke]
@@ -27,11 +28,10 @@ import common
 from common import (RESULTS, eve_leg, guarded, keypair, loadavg, run_parallel, runner_outcome,
                     runner_exit, stopping_check, wilson)
 
-import eve as eve_mod
-
 from qkd.core.config import ProtocolParams
 from qkd.core.finite_key import secure_key_length
-from qkd.core.quantum_channel import eve_intercept_resend as real_eve
+from qkd.core.bb84_protocol import generate_random_bases, generate_random_bits
+from qkd.core.quantum_channel import eve_intercept_resend, measure_qubits, prepare_qubits
 from qkd.services.reporting import NullReporter
 from qkd.usecases import receive_file as rf
 from qkd.usecases import send_file as sf
@@ -134,11 +134,11 @@ def one_run(n: int, f: float, payload: str, aid, bid) -> dict:
         a_end, eve_a = socket.socketpair()
         eve_b, b_end = socket.socketpair()
         try:
-            with eve_mod.install_partial_eve(f), a_end, eve_a, eve_b, b_end:
+            with a_end, eve_a, eve_b, b_end:
                 a_res, b_res, _ = run_parallel(
                     guarded(lambda s: sf.send_file(s, payload, a_rep, params, auth_a), a_end),
                     guarded(lambda s: rf.receive_file(s, out_dir, b_rep, params, auth_b), b_end),
-                    lambda: eve_leg(lambda: run_eavesdrop(eve_a, eve_b, NullReporter(), threshold=params.qber_threshold), eve_a, eve_b),
+                    lambda: eve_leg(lambda: run_eavesdrop(eve_a, eve_b, NullReporter(), threshold=params.qber_threshold, fraction=f), eve_a, eve_b),
                 )
         finally:
             restore()
@@ -173,22 +173,32 @@ def one_run(n: int, f: float, payload: str, aid, bid) -> dict:
     }
 
 
-# ── sanity checks ────────────────────────────────────────────────────────────
+# ── sanity checks (channel level, native eve_intercept_resend) ───────────────
+def _sifted_error_counts(fraction: float, n: int) -> tuple[int, int]:
+    """One Alice->Eve->Bob round with the native partial-f Eve; (sifted_errors, sifted)."""
+    a_bits = generate_random_bits(n)
+    a_bases = generate_random_bases(n)
+    qubits = prepare_qubits(a_bits, a_bases)
+    mod_qasm, _, _ = eve_intercept_resend(qubits, fraction)
+    b_bases = generate_random_bases(n)
+    b_bits = measure_qubits(mod_qasm, b_bases)
+    matching = [i for i in range(n) if a_bases[i] == b_bases[i]]
+    errors = sum(1 for i in matching if a_bits[i] != b_bits[i])
+    return errors, len(matching)
+
+
 def sanity(rounds: int = 30, n: int = 2048) -> dict:
-    full = eve_mod.partial_eve_intercept_resend(1.0)
-    zero = eve_mod.partial_eve_intercept_resend(0.0)
     agg = {}
-    for name, fn in (("real", real_eve), ("wrap_f1", full), ("wrap_f0", zero)):
+    for name, fraction in (("f1", 1.0), ("f0", 0.0)):
         e = s = 0
         for _ in range(rounds):
-            ee, ss = eve_mod.sifted_error_counts(fn, n)
+            ee, ss = _sifted_error_counts(fraction, n)
             e += ee; s += ss
         p, lo, hi = wilson(e, s)
         agg[name] = {"errors": e, "sifted": s, "rate": p, "lo": lo, "hi": hi}
-    r, w1, w0 = agg["real"], agg["wrap_f1"], agg["wrap_f0"]
-    overlap = not (w1["hi"] < r["lo"] or r["hi"] < w1["lo"])
-    agg["f1_matches_real"] = overlap
-    agg["f0_is_zero"] = (w0["errors"] == 0)
+    # Full intercept-resend disturbs ~25% of sifted bits; f=0 disturbs none.
+    agg["f1_near_quarter"] = (agg["f1"]["lo"] <= 0.25 <= agg["f1"]["hi"])
+    agg["f0_is_zero"] = (agg["f0"]["errors"] == 0)
     return agg
 
 
@@ -207,12 +217,11 @@ def main() -> int:
     sc = sanity(3 if args.smoke else 30, 2048)
     with open(RESULTS / "e1_eve_sanity.csv", "w", newline="") as fcsv:
         w = csv.writer(fcsv); w.writerow(["case", "errors", "sifted", "rate", "wilson_lo", "wilson_hi"])
-        for name in ("real", "wrap_f1", "wrap_f0"):
+        for name in ("f1", "f0"):
             d = sc[name]; w.writerow([name, d["errors"], d["sifted"], f"{d['rate']:.4f}", f"{d['lo']:.4f}", f"{d['hi']:.4f}"])
-    print(f"[E1] SANITY (a) f=1 vs real: real={sc['real']['rate']:.4f}[{sc['real']['lo']:.4f},{sc['real']['hi']:.4f}] "
-          f"wrap_f1={sc['wrap_f1']['rate']:.4f}[{sc['wrap_f1']['lo']:.4f},{sc['wrap_f1']['hi']:.4f}] "
-          f"-> intervals overlap: {sc['f1_matches_real']}", flush=True)
-    print(f"[E1] SANITY (b) f=0 error rate exactly 0: {sc['f0_is_zero']} (errors={sc['wrap_f0']['errors']})", flush=True)
+    print(f"[E1] SANITY (a) f=1.0 sifted error ~25%: {sc['f1']['rate']:.4f}"
+          f"[{sc['f1']['lo']:.4f},{sc['f1']['hi']:.4f}] -> contains 0.25: {sc['f1_near_quarter']}", flush=True)
+    print(f"[E1] SANITY (b) f=0 error rate exactly 0: {sc['f0_is_zero']} (errors={sc['f0']['errors']})", flush=True)
 
     rows = []
     for n in n_list:

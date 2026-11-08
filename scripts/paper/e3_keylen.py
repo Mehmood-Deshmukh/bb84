@@ -21,8 +21,6 @@ import tempfile
 import common
 from common import RESULTS, eve_leg, guarded, keypair, loadavg, run_parallel, stopping_check
 
-import eve as eve_mod
-
 from qkd.core.config import ProtocolParams
 from qkd.core.finite_key import secure_key_length, deviation
 from qkd.services.reporting import NullReporter
@@ -65,11 +63,11 @@ def one_run(f: float, qmax: float, payload: str, aid, bid) -> dict:
     auth_b = AuthContext("hybrid", bid[0], bid[1], PinnedVerifier(aid[0]))
     with tempfile.TemporaryDirectory() as out_dir:
         a_end, eve_a = socket.socketpair(); eve_b, b_end = socket.socketpair()
-        with eve_mod.install_partial_eve(f), a_end, eve_a, eve_b, b_end:
+        with a_end, eve_a, eve_b, b_end:
             a_res, b_res, _ = run_parallel(
                 guarded(lambda s: sf.send_file(s, payload, NullReporter(), params, auth_a), a_end),
                 guarded(lambda s: rf.receive_file(s, out_dir, NullReporter(), params, auth_b), b_end),
-                lambda: eve_leg(lambda: run_eavesdrop(eve_a, eve_b, NullReporter(), threshold=qmax), eve_a, eve_b),
+                lambda: eve_leg(lambda: run_eavesdrop(eve_a, eve_b, NullReporter(), threshold=qmax, fraction=f), eve_a, eve_b),
             )
     kx = common._kx_of(a_res) or common._kx_of(b_res)
     return {"f": f, "qmax": qmax, "qber": kx.qber if kx else None,

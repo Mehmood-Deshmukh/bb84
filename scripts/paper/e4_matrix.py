@@ -7,7 +7,7 @@ bytes_at_bob, attacker_plaintext, alice_reported_success.
 
 Reuses tests/invariants/support.py (proxy, PinnedVerifier, RecordingReporter), the six
 tamper functions from tests/invariants/test_tamper.py, qkd.usecases.mitm_demo.run_mitm,
-qkd.usecases.eavesdrop_demo.run_eavesdrop, scripts/paper/eve.py (partial-f), and the
+qkd.usecases.eavesdrop_demo.run_eavesdrop (native partial-f via fraction=), and the
 file_stream / handshake primitives for the malicious-sender rows. src/ and tests/ are not
 edited.
 
@@ -26,8 +26,6 @@ from cryptography.exceptions import InvalidTag
 
 import common
 from common import RESULTS, eve_leg, guarded, keypair, loadavg, run_parallel
-
-import eve as eve_mod
 
 from qkd.core.config import ProtocolParams
 from qkd.services.file_stream import encrypt_chunk, encrypt_metadata, derive_chunk_nonce, key_schedule
@@ -140,12 +138,11 @@ def cell_eve(mode: str, f: float, src: str) -> dict:
     a_rep, b_rep = RecordingReporter(), RecordingReporter()
     a_end, eve_a = socket.socketpair(); eve_b, b_end = socket.socketpair()
     with tempfile.TemporaryDirectory() as out, a_end, eve_a, eve_b, b_end:
-        with eve_mod.install_partial_eve(f):
-            a, b, _ = run_parallel(
-                guarded(lambda s: send_file(s, src, a_rep, params, _ctx(ALICE_ID, BOB_ID[0], mode)), a_end),
-                guarded(lambda s: receive_file(s, out, b_rep, params, _ctx(BOB_ID, ALICE_ID[0], mode)), b_end),
-                lambda: eve_leg(lambda: run_eavesdrop(eve_a, eve_b, NullReporter(), threshold=params.qber_threshold), eve_a, eve_b),
-            )
+        a, b, _ = run_parallel(
+            guarded(lambda s: send_file(s, src, a_rep, params, _ctx(ALICE_ID, BOB_ID[0], mode)), a_end),
+            guarded(lambda s: receive_file(s, out, b_rep, params, _ctx(BOB_ID, ALICE_ID[0], mode)), b_end),
+            lambda: eve_leg(lambda: run_eavesdrop(eve_a, eve_b, NullReporter(), threshold=params.qber_threshold, fraction=f), eve_a, eve_b),
+        )
         return _row(a, b, a_rep, b_rep)
 
 
