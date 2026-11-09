@@ -4,25 +4,28 @@ Composable finite-key decoy-state rates vs distance (Phase 5a, numbers only).
 
     python scripts/decoy_finitekey.py [--max-km 150] [--step-km 2.5] [--n-ref 1e9]
 
-For the GYS and KTH presets this sweeps the fibre length and, at each distance, optimises the
-three-intensity decoy setup (signal mu1, decoy mu2, vacuum mu3 = 0; send-probabilities p1, p2, p3;
-basis bias q_x) to maximise the Lim et al. composable finite-key length (core/decoy_finitekey.py,
-PRA 89, 022307, 2014) at a fixed reference block size N = --n-ref. It overlays that composable
-rate on the Phase 1 asymptotic envelopes from core/decoy.py (single-photon source, infinite decoy,
-vacuum+weak), and tabulates the required N and ell to reach a 256-bit key at 0/25/50 km.
+The implemented BB84 uses symmetric bases, so this figure and both tables fix q_x = 0.5 throughout
+(Phase 5a's earlier figure optimised q_x ~ 0.79 and so disagreed with the d5 live runs). For the
+GYS and KTH presets it sweeps the fibre length and, at each distance, optimises the three-intensity
+decoy setup (signal mu1, decoy mu2, vacuum mu3 = 0; send-probabilities p1, p2, p3) at q_x = 0.5 to
+maximise the Lim et al. composable finite-key length (core/decoy_finitekey.py, PRA 89, 022307, 2014).
+It overlays that composable rate on the Phase 1 asymptotic envelopes from core/decoy.py
+(single-photon source, infinite decoy, no decoy / GLLP), and tabulates the required N and ell to
+reach a 256-bit key at 0/25/50 km.
 
-Two optimisation modes are used, both standard:
-  * the rate-vs-distance curve optimises the setup per distance at the fixed block N = --n-ref
-    (as in the paper's Fig 1), warm-started across distances for a smooth curve;
-  * the required-N table fixes ONE setup per preset (optimised at 25 km, N = --n-ref) and finds
-    the smallest N reaching 256 bits at each distance, so the table is monotonic and reports a
-    single optimal intensity choice. The per-distance curve setups are written to the CSV too.
+Two reference block sizes, both with q_x = 0.5:
+  * the rate-vs-distance curve optimises the setup per distance at N = --n-ref (default 1e9, as in
+    Phase 5a's figure), warm-started across distances; its max distance is thus comparable to the
+    earlier q_x-optimised 80/55 km;
+  * the required-N table optimises per distance at N = 3e8 (the block the d5 harness optimises at),
+    so the required N reproduces the d5 live numbers, and reports the per-distance intensities.
 
-The composable bound uses eps_sec = 1e-10, eps_cor = 1e-15 (the single-photon path's values) and
-f_EC = 1.16 (Lim et al.); the asymptotic overlays use decoy.py's defaults (f = 1.22). Outputs:
-a CSV to experiments/results/decoy_finitekey/<run id>/ and a two-panel figure to
-experiments/figures/decoy_finitekey_rate_vs_distance.pdf (+ .png). Pure numerics, no qiskit, no
-processes. Needs the `experiments` extra (matplotlib). The run-id folder mirrors scripts/benchmark.py.
+Every curve uses one convention: eps_sec = 1e-10, eps_cor = 1e-15, f_EC = 1.16 (Lim et al.), and the
+single-photon overlay is decoy.rate_single_photon = 1/2 Y1 (1 - (1+f) h(e1)), the same formula
+channel_model.expected_secure_rate and the paper's key-rate figure use. Outputs: a CSV to
+experiments/results/decoy_finitekey/<run id>/ and the two-panel figure
+experiments/figures/decoy_finitekey_rate_vs_distance.pdf (+ .png) -- the paper figure is this
+q_x = 0.5 one. Pure numerics, no qiskit, no processes. Needs the `experiments` extra (matplotlib).
 """
 
 from __future__ import annotations
@@ -50,27 +53,35 @@ from qkd.core.channel_model import preset  # noqa: E402
 
 PRESETS = ("GYS", "KTH")
 EPS_SEC, EPS_COR = 1e-10, 1e-15
+F_EC = 1.16                 # one convention for every curve and both figures (Lim et al.)
+Q_X = 0.5                   # symmetric bases, matching the implemented BB84 and the d5 live runs
 TABLE_DISTANCES = (0.0, 25.0, 50.0)
+# The required-N table (and the live d5 harness) optimise the setup at this reference block, so
+# the table reproduces the d5 required N; the rate curve uses the larger --n-ref (default 1e9),
+# as Phase 5a's figure did, so its max distance is comparable to the q_x-optimised 80/55 km.
+N_REF_TABLE = 3e8
 
 # Palette and styling borrowed from scripts/decoy_rates.py (validated categorical order).
 CATEGORICAL = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
 INK, INK_SECONDARY, INK_MUTED, GRID = "#0b0b0b", "#52514e", "#8a8985", "#e4e3df"
 
-CURVE_COLUMNS = ["infinite_decoy", "vacuum_weak", "single_photon", "composable_finite"]
+CURVE_COLUMNS = ["single_photon", "infinite_decoy", "no_decoy", "composable_finite"]
 CURVE_LABELS = {
-    "infinite_decoy": "Infinite decoy (asymptotic)",
-    "vacuum_weak": "Vacuum+weak (asymptotic)",
     "single_photon": "Single-photon source (asymptotic)",
-    "composable_finite": "Composable finite-key",
+    "infinite_decoy": "Infinite decoy (asymptotic)",
+    "no_decoy": "No decoy, GLLP (asymptotic)",
+    "composable_finite": "Composable finite-key (q_x=0.5)",
 }
-CURVE_COLORS = {"infinite_decoy": CATEGORICAL[2], "vacuum_weak": CATEGORICAL[3],
-                "single_photon": CATEGORICAL[4], "composable_finite": CATEGORICAL[0]}
-CURVE_STYLES = {"infinite_decoy": "--", "vacuum_weak": "--", "single_photon": "--",
+CURVE_COLORS = {"single_photon": CATEGORICAL[4], "infinite_decoy": CATEGORICAL[2],
+                "no_decoy": CATEGORICAL[1], "composable_finite": CATEGORICAL[0]}
+CURVE_STYLES = {"single_photon": "--", "infinite_decoy": "--", "no_decoy": "--",
                 "composable_finite": "-"}
 
-# Optimisation bounds for (mu1, mu2, q_x, p1, p2); mu3 = 0, p3 = 1 - p1 - p2.
-BOUNDS = [(1e-3, 0.9), (1e-3, 0.9), (0.3, 0.97), (0.02, 0.95), (0.02, 0.95)]
-STARTS = [(0.5, 0.1, 0.7, 0.5, 0.35), (0.6, 0.2, 0.85, 0.4, 0.4), (0.4, 0.08, 0.6, 0.5, 0.3)]
+# Optimisation over (mu1, mu2, p1, p2) at the fixed symmetric bias q_x = 0.5; mu3 = 0,
+# p3 = 1 - p1 - p2. These are the same four starts the d5 harness uses, so the optimisation
+# reproduces the live intensities.
+BOUNDS = [(1e-3, 0.9), (1e-3, 0.9), (0.02, 0.95), (0.02, 0.95)]
+STARTS = [(0.5, 0.1, 0.5, 0.35), (0.45, 0.12, 0.4, 0.4), (0.55, 0.15, 0.4, 0.4)]
 
 
 def style() -> None:
@@ -106,19 +117,19 @@ def _clamp(x) -> list:
 
 
 def _finite_rate(params, x, n_ref: float) -> float:
-    """Composable ell/N for setup x = (mu1, mu2, q_x, p1, p2) at block size n_ref; -1 if invalid."""
-    mu1, mu2, q_x, p1, p2 = x
+    """Composable ell/N for setup x = (mu1, mu2, p1, p2) at q_x = 0.5, block n_ref; -1 if invalid."""
+    mu1, mu2, p1, p2 = x
     if not (mu2 < mu1 and p1 + p2 < 0.98):
         return -1.0
     try:
-        counts = dfk.expected_counts(params, n_ref, (mu1, mu2, 0.0), (p1, p2, 1.0 - p1 - p2), q_x)
-        return dfk.secure_key_length(counts, EPS_SEC, EPS_COR).raw / n_ref
+        counts = dfk.expected_counts(params, n_ref, (mu1, mu2, 0.0), (p1, p2, 1.0 - p1 - p2), Q_X)
+        return dfk.secure_key_length(counts, EPS_SEC, EPS_COR, F_EC).raw / n_ref
     except (ValueError, ZeroDivisionError):
         return -1.0
 
 
 def optimise_setup(params, n_ref: float, warm: Optional[list] = None) -> tuple[float, list]:
-    """Best (rate_per_pulse, setup) maximising the composable ell/N at n_ref, warm-started."""
+    """Best (rate_per_pulse, setup=(mu1,mu2,p1,p2)) maximising the composable ell/N at q_x=0.5."""
     starts = ([warm] + STARTS) if warm is not None else STARTS
     best_rate, best_x = -1.0, None
     for x0 in starts:
@@ -129,14 +140,23 @@ def optimise_setup(params, n_ref: float, warm: Optional[list] = None) -> tuple[f
     return best_rate, best_x
 
 
-# ── asymptotic overlays (decoy.py) ───────────────────────────────────────────
+def setup_arrays(setup) -> tuple[tuple, tuple]:
+    """Round a (mu1, mu2, p1, p2) setup to the (intensities, probs) the live runs use (p3 exact)."""
+    mu1, mu2, p1, p2 = (float(v) for v in setup)
+    p1, p2 = round(p1, 6), round(p2, 6)
+    return (round(mu1, 6), round(mu2, 6), 0.0), (p1, p2, 1.0 - p1 - p2)
 
-def asymptotic_rates(params, f_ec: float) -> dict[str, float]:
+
+# ── asymptotic overlays (decoy.py) at the shared f_EC = 1.16 convention ───────
+
+def asymptotic_rates(params, f_ec: float = F_EC) -> dict[str, float]:
+    # single_photon is decoy.rate_single_photon = 1/2 Y1 (1 - (1+f) h(e1)), the same formula
+    # channel_model.expected_secure_rate and the paper's key-rate figure use.
     out = {"single_photon": decoy.rate_single_photon(params, f=f_ec)}
     mu_inf = decoy.optimal_mu(params, "infinite_decoy", f=f_ec)
     out["infinite_decoy"] = decoy.rate_infinite_decoy(params, mu_inf, f=f_ec)
-    mu_vw = decoy.optimal_mu(params, "vacuum_weak", nu=0.05, f=f_ec)
-    out["vacuum_weak"] = decoy.rate_vacuum_weak(params, mu_vw, 0.05, f=f_ec)
+    mu_nd = decoy.optimal_mu(params, "no_decoy", f=f_ec)
+    out["no_decoy"] = decoy.rate_no_decoy(params, mu_nd, f=f_ec)
     return out
 
 
@@ -149,29 +169,32 @@ def sweep(name: str, lengths: np.ndarray, n_ref: float) -> list[dict]:
         params = base.at_length(float(length))
         rate, setup = optimise_setup(params, n_ref, warm)
         warm = setup
-        asy = asymptotic_rates(params, decoy.F_EC_DEFAULT)
-        mu1, mu2, q_x, p1, p2 = setup
+        asy = asymptotic_rates(params)
+        mu1, mu2, p1, p2 = setup
         rows.append({
             "preset": name, "length_km": round(float(length), 4), "eta": params.eta,
             "composable_finite": max(0.0, rate), **asy,
-            "mu1": mu1, "mu2": mu2, "q_x": q_x, "p1": p1, "p2": p2, "p3": 1.0 - p1 - p2,
+            "mu1": mu1, "mu2": mu2, "q_x": Q_X, "p1": p1, "p2": p2, "p3": 1.0 - p1 - p2,
         })
     return rows
 
 
-def required_table(name: str, n_ref: float) -> tuple[list[dict], tuple]:
-    """Optimise one setup at 25 km, then the smallest N for 256 bits at each table distance."""
+def required_table(name: str) -> list[dict]:
+    """Per-distance optimised (q_x=0.5, N_REF_TABLE) smallest N for 256 bits -- matches d5."""
     base = preset(name)
-    _, setup = optimise_setup(base.at_length(25.0), n_ref)
-    mu1, mu2, q_x, p1, p2 = setup
-    intensities, probs = (mu1, mu2, 0.0), (p1, p2, 1.0 - p1 - p2)
     rows = []
-    for req in dfk.required_N(base, list(TABLE_DISTANCES), intensities, probs,
-                              EPS_SEC, EPS_COR, ell_min=256, q_x=q_x):
-        rows.append({"preset": name, "length_km": req.length_km, "required_N": req.n_pulses,
+    for length in TABLE_DISTANCES:
+        params = base.at_length(length)
+        _, setup = optimise_setup(params, N_REF_TABLE)
+        intensities, probs = setup_arrays(setup)
+        req = dfk.required_N(params, [length], intensities, probs,
+                             EPS_SEC, EPS_COR, ell_min=256, q_x=Q_X)[0]
+        rows.append({"preset": name, "length_km": length, "required_N": req.n_pulses,
                      "log2_N": (np.log2(req.n_pulses) if req.n_pulses else None),
-                     "ell_at_N": req.ell_at_n, "feasible": req.feasible})
-    return rows, (intensities, probs, q_x)
+                     "ell_at_N": req.ell_at_n, "feasible": req.feasible,
+                     "mu1": intensities[0], "mu2": intensities[1],
+                     "p1": probs[0], "p2": probs[1], "p3": probs[2]})
+    return rows
 
 
 def max_distance(rows: list[dict], method: str) -> Optional[float]:
@@ -194,7 +217,7 @@ def write_csv(path: Path, sweeps: dict[str, list[dict]], tables: dict[str, list[
     table_path = path.with_name("required_N.csv")
     with open(table_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["preset", "length_km", "required_N", "log2_N",
-                                               "ell_at_N", "feasible"])
+                                               "ell_at_N", "feasible", "mu1", "mu2", "p1", "p2", "p3"])
         writer.writeheader()
         for name in PRESETS:
             for row in tables[name]:
@@ -228,7 +251,7 @@ def plot(sweeps: dict[str, list[dict]], out_pdf: Path, n_ref: float) -> dict:
         ax.set_xlabel("Fibre length (km)")
     axes[0].set_ylabel("Secure key rate per pulse")
     axes[0].legend(loc="lower left")
-    fig.suptitle(f"Decoy-state BB84: composable finite-key (N={n_ref:.0e}) vs asymptotic rate",
+    fig.suptitle(f"Decoy-state BB84: composable finite-key (q_x=0.5, N={n_ref:.0e}) vs asymptotic rate",
                  fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
@@ -249,9 +272,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     lengths = np.arange(0.0, args.max_km + args.step_km / 2, args.step_km)
 
     sweeps = {name: sweep(name, lengths, args.n_ref) for name in PRESETS}
-    tables, configs = {}, {}
-    for name in PRESETS:
-        tables[name], configs[name] = required_table(name, args.n_ref)
+    tables = {name: required_table(name) for name in PRESETS}
 
     out_dir = ROOT / "experiments" / "results" / "decoy_finitekey" / run_id(started)
     write_csv(out_dir / "rates.csv", sweeps, tables)
@@ -259,17 +280,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     maxima = plot(sweeps, fig_path, args.n_ref)
 
     print(f"CSV:    {out_dir / 'rates.csv'}  (+ required_N.csv)")
-    print(f"Figure: {fig_path} (+ .png)")
+    print(f"Figure: {fig_path} (+ .png)   [q_x = {Q_X}, f_EC = {F_EC}]")
     for name in PRESETS:
-        intensities, probs, q_x = configs[name]
-        print(f"\n[{name}] composable max distance (N={args.n_ref:.0e}): "
+        print(f"\n[{name}] composable max distance (q_x={Q_X}, N={args.n_ref:.0e}): "
               f"{maxima[name]['composable_finite']} km   "
-              f"(asymptotic: infinite_decoy {maxima[name]['infinite_decoy']} km)")
-        print(f"    table setup: mu=({intensities[0]:.3f},{intensities[1]:.3f},0) "
-              f"probs=({probs[0]:.2f},{probs[1]:.2f},{probs[2]:.2f}) q_x={q_x:.3f}")
+              f"(asymptotic infinite_decoy {maxima[name]['infinite_decoy']} km)")
         for row in tables[name]:
             n = row["required_N"]
-            tag = f"{n:,} (2^{row['log2_N']:.1f}), ell={row['ell_at_N']}" if n else "infeasible"
+            tag = (f"{n:,} (2^{row['log2_N']:.1f}), ell={row['ell_at_N']}, "
+                   f"mu=({row['mu1']},{row['mu2']}) p=({row['p1']},{row['p2']},{round(row['p3'],6)})"
+                   if n else "infeasible")
             print(f"    {row['length_km']:>5.0f} km: required N = {tag}")
     return 0
 
