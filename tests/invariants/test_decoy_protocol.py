@@ -62,8 +62,9 @@ def test_honest_decoy_transfer(mode, keys, parallel, make_file, same_file, tmp_p
     # Measured gains match the decoy model within sampling tolerance.
     assert gains[SIGNAL] == pytest.approx(decoy.gain(GYS_25KM, 0.48), rel=0.1)
     assert gains[DECOY] == pytest.approx(decoy.gain(GYS_25KM, 0.1), rel=0.15)
-    # Decoy QBER is around the misalignment error e_d = 0.033.
-    assert qbers[DECOY] == pytest.approx(0.033, abs=0.025)
+    # Decoy QBER is around the misalignment error e_d = 0.033. The estimate is over only the few
+    # hundred decoy-sifted bits, so its standard error is ~0.015; allow ~2.5 sigma either way.
+    assert qbers[DECOY] == pytest.approx(0.033, abs=0.037)
 
     # The Y1 lower bound tracks the true single-photon yield and stays close to (at or a
     # little below) it. It is conservative only in expectation: this is an asymptotic point

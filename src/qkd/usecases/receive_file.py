@@ -26,7 +26,7 @@ from qkd.core.bb84_protocol import (
 )
 from qkd.core.config import ProtocolParams
 from qkd.core.channel_model import ChannelParams, decode_pulses, misalignment_flips
-from qkd.core.quantum_channel import measure_qubits
+from qkd.core.quantum_channel import measure_qubits_backend
 from qkd.services.file_stream import receive_encrypted_file, receive_file_meta, received_path
 from qkd.services.reporting import Reporter
 from qkd.services.resume import ResumeError, chunk_boundary, receive_encrypted_file_resumable, validate_meta
@@ -36,6 +36,7 @@ from qkd.usecases.common import (
     KeyExchangeResult,
     TransferInterrupted,
     decoy_asymptotic_verdict,
+    decoy_finite_key_verdict,
     finite_key_verdict,
     report_qber_verdict,
     report_summary,
@@ -55,7 +56,7 @@ class ReceiveResult:
 
 
 def _measure(
-    channel: TranscriptChannel, link: ChannelParams, reporter: Reporter
+    channel: TranscriptChannel, link: ChannelParams, reporter: Reporter, measurement: str = "aer"
 ) -> tuple[int, list[int], list[str], list[int]]:
     """
     Step 1 for Bob: receive the pulses that clicked, measure them, return
@@ -64,7 +65,8 @@ def _measure(
 
     Bob's detector is emulated here: photons are measured in a random basis and the
     result is flipped with the misalignment probability; a click from background alone
-    (a null qubit) gives a uniformly random bit.
+    (a null qubit) gives a uniformly random bit. ``measurement`` picks the backend: "aer"
+    runs Qiskit per qubit; "analytic" computes the outcomes in NumPy (see quantum_channel).
     """
     reporter.info("Receiving qubits from quantum channel...")
     n, index, qubits = decode_pulses(channel.recv_untracked())
@@ -73,15 +75,18 @@ def _measure(
     reporter.success(f"{m} of {n} pulses clicked ({len(photons)} photons, {m - len(photons)} background)")
     reporter.metrics(raw_qubits=n, detected=m)
 
+    rng = np.random.default_rng()
+    qrng = rng if measurement == "analytic" else None
     reporter.info("Generating random measurement bases...")
     t_sim = time.perf_counter()
-    bases = generate_random_bases(m)
+    bases = generate_random_bases(m, qrng)
 
     reporter.info("Measuring qubits (collapsing quantum states)...")
     t0 = time.perf_counter()
-    measured = measure_qubits([qubits[i] for i in photons], [bases[i] for i in photons])
-    flips = misalignment_flips(len(photons), link, np.random.default_rng())
-    bits = generate_random_bits(m)  # background clicks keep these random bits
+    measured = measure_qubits_backend([qubits[i] for i in photons], [bases[i] for i in photons],
+                                      measurement, rng)
+    flips = misalignment_flips(len(photons), link, rng)
+    bits = generate_random_bits(m, qrng)  # background clicks keep these random bits
     for i, bit, flip in zip(photons, measured, flips):
         bits[i] = bit ^ int(flip)
     reporter.success(f"Measured {len(photons)} qubits in {time.perf_counter() - t0:.2f}s")
@@ -132,7 +137,7 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     """
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
-    raw, bits, bases, index = _measure(channel, params.channel, reporter)
+    raw, bits, bases, index = _measure(channel, params.channel, reporter, params.measurement)
     sifted, matching = _sift(channel, raw, bits, bases, index, reporter, preloss)
 
     # With a decoy source, read the intensity labels (step 2d) and keep only the signal
@@ -159,7 +164,9 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     if params.reconciliation == "cascade":
         rec = bob_reconcile(channel, kept, qber, sample_size, reporter)
         kept, leaked = rec.bits, rec.leaked_bits
-    if params.decoy_enabled:
+    if params.decoy_enabled and params.decoy_gate == "composable":
+        secure, reason = decoy_finite_key_verdict(est, qber, params, reporter)
+    elif params.decoy_enabled:
         secure, reason = decoy_asymptotic_verdict(len(kept), est, params, reporter, leaked)
     else:
         secure, reason = finite_key_verdict(len(kept), sample_size, qber, params, reporter, leaked)

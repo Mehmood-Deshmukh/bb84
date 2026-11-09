@@ -35,7 +35,7 @@ import numpy as np
 
 from qkd.core.channel_model import encode_pulses
 from qkd.core.config import ProtocolParams
-from qkd.core.quantum_channel import eve_passthrough, eve_pns, measure_qubits
+from qkd.core.quantum_channel import eve_passthrough, eve_pns, measure_qubits_backend
 from qkd.core.source import SIGNAL
 from qkd.services.reporting import Reporter
 from qkd.services.wire import forward_message, recv_json, relay_until_closed, send_json
@@ -128,7 +128,8 @@ def run_pns(
     matching = json.loads(forward_message(alice, bob))    # Alice's matching indices (into detected)
 
     known_signal, sifted_signal = _measure_stored(
-        plan, detected, bob_bases, matching, pl["index"], pl["labels"], source, reporter)
+        plan, detected, bob_bases, matching, pl["index"], pl["labels"], source, reporter,
+        params.measurement, rng)
 
     reporter.metrics(eve_known_signal=known_signal, eve_sifted_signal=sifted_signal,
                      eve_known_fraction=round(known_signal / sifted_signal, 6) if sifted_signal else 0.0)
@@ -138,7 +139,8 @@ def run_pns(
                               plan.blocked, plan.forwarded_single, plan.split)
 
 
-def _measure_stored(plan, detected, bob_bases, matching, handed_index, handed_labels, source, reporter):
+def _measure_stored(plan, detected, bob_bases, matching, handed_index, handed_labels, source, reporter,
+                    measurement="aer", rng=None):
     """
     Measure Eve's stored photons at the sifted signal positions, in Bob's revealed basis.
 
@@ -161,8 +163,8 @@ def _measure_stored(plan, detected, bob_bases, matching, handed_index, handed_la
     known = 0
     if to_measure:
         # One batched Aer job; at a sifted position the stored photon yields Alice's bit exactly.
-        known = len(measure_qubits([stored_qubit_by_g[g] for g in to_measure],
-                                   [bob_basis_by_g[g] for g in to_measure]))
+        known = len(measure_qubits_backend([stored_qubit_by_g[g] for g in to_measure],
+                                           [bob_basis_by_g[g] for g in to_measure], measurement, rng))
     pct = (known / len(key_globals) * 100) if key_globals else 0.0
     reporter.info(f"Eve knows {known}/{len(key_globals)} signal sifted-key bits ({pct:.1f}%)")
     return known, len(key_globals)

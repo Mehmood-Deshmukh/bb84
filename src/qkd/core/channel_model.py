@@ -211,8 +211,12 @@ def decode_pulses(msg: object) -> tuple[int, list[int], list[str | None]]:
     n, index, qubits = msg.get("n"), msg.get("index"), msg.get("qubits")
     if not isinstance(n, int) or isinstance(n, bool) or n < 0:
         raise ValueError("qubit message: n must be a non-negative integer")
-    if not isinstance(qubits, list) or not all(q is None or isinstance(q, str) for q in qubits):
-        raise ValueError("qubit message: qubits must be a list of strings or nulls")
+    # A qubit entry is a QASM string (aer backend), an integer code 0-3 (analytic backend), or
+    # null for a background-only click. bools are JSON ints but never valid codes.
+    def _ok(q: object) -> bool:
+        return q is None or isinstance(q, str) or (isinstance(q, int) and not isinstance(q, bool) and 0 <= q <= 3)
+    if not isinstance(qubits, list) or not all(_ok(q) for q in qubits):
+        raise ValueError("qubit message: qubits must be a list of QASM strings, integer codes 0-3, or nulls")
     if len(qubits) > n:
         raise ValueError("qubit message: more qubits than pulses")
     if index is None:

@@ -34,6 +34,9 @@ from qkd.core.channel_model import ChannelParams
 # Fixed label order (index into intensities/probs): 0 signal, 1 decoy, 2 vacuum.
 SIGNAL, DECOY, VACUUM = 0, 1, 2
 
+# Pulses per chunk in sample_clicks_decoy: caps its working memory so N = 10^8 fits in RAM.
+_CHUNK = 4_000_000
+
 
 @dataclass(frozen=True)
 class DecoyClicks:
@@ -101,28 +104,38 @@ def sample_clicks_decoy(n_pulses: int, intensities, probs, params: ChannelParams
         raise ValueError("intensities and probs must be 1-D arrays of the same length")
     if n_pulses < 0:
         raise ValueError("n_pulses must not be negative")
-    eta, y0 = params.eta, params.dark_count_prob
+    eta, y0, k = params.eta, params.dark_count_prob, len(intensities)
 
     if n_pulses == 0:
         empty_i, empty_b = np.zeros(0, np.int64), np.zeros(0, bool)
         return DecoyClicks(0, empty_i, empty_b, np.zeros(0, np.int8), empty_i,
-                           np.zeros(len(intensities), np.int64))
+                           np.zeros(k, np.int64))
 
-    labels = rng.choice(len(intensities), size=n_pulses, p=probs)   # intensity per pulse
-    photons = rng.poisson(intensities[labels])                       # n ~ Poisson(mu_k)
-    arrived = rng.binomial(photons, eta)                             # photons reaching Bob
-    signal_click = arrived >= 1
-    # A dark count gives a click only when no photon arrived (photon precedence).
-    dark_click = (~signal_click) & (rng.random(n_pulses) < y0)
-    click = signal_click | dark_click
+    # Process the N pulses in chunks and keep only the clicked ones, so the memory is proportional
+    # to the clicks (plus one chunk), not to N. This makes N = 10^8 feasible on a normal machine;
+    # it is exact in distribution (each pulse is independent), only the RNG draw order changes.
+    sent = np.zeros(k, np.int64)
+    idx_parts, sig_parts, lab_parts, pho_parts = [], [], [], []
+    for start in range(0, n_pulses, _CHUNK):
+        size = min(_CHUNK, n_pulses - start)
+        labels = rng.choice(k, size=size, p=probs).astype(np.int8)      # intensity per pulse
+        photons = rng.poisson(intensities[labels]).astype(np.int64)      # n ~ Poisson(mu_k)
+        arrived = rng.binomial(photons, eta)                             # photons reaching Bob
+        signal_click = arrived >= 1
+        # A dark count gives a click only when no photon arrived (photon precedence).
+        dark_click = (~signal_click) & (rng.random(size) < y0)
+        click = signal_click | dark_click
+        sent += np.bincount(labels, minlength=k).astype(np.int64)
+        local = np.nonzero(click)[0]
+        if local.size:
+            idx_parts.append(local.astype(np.int64) + start)
+            sig_parts.append(signal_click[local])
+            lab_parts.append(labels[local])
+            pho_parts.append(photons[local])
 
-    idx = np.nonzero(click)[0].astype(np.int64)
-    sent = np.bincount(labels, minlength=len(intensities)).astype(np.int64)
-    return DecoyClicks(
-        n_pulses,
-        idx,
-        signal_click[idx],
-        labels[idx].astype(np.int8),
-        photons[idx].astype(np.int64),
-        sent,
-    )
+    empty_i, empty_b = np.zeros(0, np.int64), np.zeros(0, bool)
+    idx = np.concatenate(idx_parts) if idx_parts else empty_i
+    signal = np.concatenate(sig_parts) if sig_parts else empty_b
+    label = np.concatenate(lab_parts) if lab_parts else np.zeros(0, np.int8)
+    photons_out = np.concatenate(pho_parts) if pho_parts else empty_i
+    return DecoyClicks(n_pulses, idx, signal, label, photons_out, sent)

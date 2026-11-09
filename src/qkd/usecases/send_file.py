@@ -37,7 +37,7 @@ from qkd.core.bb84_protocol import (
 )
 from qkd.core.channel_model import ChannelParams, encode_pulses, sample_clicks
 from qkd.core.config import ProtocolParams
-from qkd.core.quantum_channel import prepare_qubits
+from qkd.core.quantum_channel import prepare_qubits_backend
 from qkd.core.source import SIGNAL, sample_clicks_decoy, sample_photon_numbers
 from qkd.services.file_stream import describe_file, send_encrypted_file
 from qkd.services.reporting import Reporter
@@ -48,6 +48,7 @@ from qkd.usecases.common import (
     KeyExchangeResult,
     TransferInterrupted,
     decoy_asymptotic_verdict,
+    decoy_finite_key_verdict,
     finite_key_verdict,
     report_qber_verdict,
     report_summary,
@@ -114,15 +115,17 @@ def _transmit_qubits(
         clicks = sample_clicks(n, link, rng)
         labels = sent = None
     m = len(clicks)
+    qrng = rng if params.measurement == "analytic" else None
     reporter.info(f"Channel: {m} of {n} pulses click at Bob "
                   f"({int(clicks.signal.sum())} photons, {m - int(clicks.signal.sum())} background)")
     reporter.info(f"Generating {m} random bits and bases...")
-    bits = generate_random_bits(m)
-    bases = generate_random_bases(m)
+    bits = generate_random_bits(m, qrng)
+    bases = generate_random_bases(m, qrng)
 
     reporter.info("Preparing qubits (encoding bits in quantum states)...")
     photons = [i for i in range(m) if clicks.signal[i]]
-    prepared = prepare_qubits([bits[i] for i in photons], [bases[i] for i in photons])
+    prepared = prepare_qubits_backend([bits[i] for i in photons], [bases[i] for i in photons],
+                                      params.measurement)
     qubits: list[str | None] = [None] * m
     for i, q in zip(photons, prepared):
         qubits[i] = q
@@ -146,13 +149,15 @@ def _transmit_preloss(channel: TranscriptChannel, params: ProtocolParams, report
     label_arr, photon_arr, sent_arr = sample_photon_numbers(n, mix_i, mix_p, rng)
     labels = label_arr.tolist()
     photons = photon_arr.tolist()
-    bits = generate_random_bits(n)
-    bases = generate_random_bases(n)
+    qrng = rng if params.measurement == "analytic" else None
+    bits = generate_random_bits(n, qrng)
+    bases = generate_random_bases(n, qrng)
 
     reporter.info(f"Eve-mode pre-loss handoff: generating all {n} pulses "
                   f"({int((photon_arr >= 1).sum())} with a photon)...")
     with_photon = [i for i in range(n) if photons[i] >= 1]
-    prepared = prepare_qubits([bits[i] for i in with_photon], [bases[i] for i in with_photon])
+    prepared = prepare_qubits_backend([bits[i] for i in with_photon], [bases[i] for i in with_photon],
+                                      params.measurement)
     sim_ms = (time.perf_counter() - t_sim) * 1000
 
     sent_before = channel.bytes_sent
@@ -260,7 +265,9 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
     leaked = 0
     if params.reconciliation == "cascade":
         leaked = alice_reconcile(channel, kept, reporter).leaked_bits
-    if params.decoy_enabled:
+    if params.decoy_enabled and params.decoy_gate == "composable":
+        secure, reason = decoy_finite_key_verdict(est, qber, params, reporter)
+    elif params.decoy_enabled:
         secure, reason = decoy_asymptotic_verdict(len(kept), est, params, reporter, leaked)
     else:
         secure, reason = finite_key_verdict(len(kept), len(sample_indices), qber, params, reporter, leaked)

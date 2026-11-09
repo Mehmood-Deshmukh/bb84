@@ -69,6 +69,51 @@ def prepare_qubits(bits: list[int], bases: list[str]) -> list[str]:
     return [prepare_qubit(b, basis) for b, basis in zip(bits, bases)]
 
 
+# ── analytic backend (no Qiskit): qubits as integer codes bit | basis<<1 ─────
+#
+# A BB84 eigenstate is fully described by (bit, basis), so in the analytic measurement backend a
+# prepared qubit is just the 2-bit code  code = bit | (basis == 'x') << 1  (0:|0>, 1:|1>, 2:|+>,
+# 3:|->). These codes travel the wire in place of QASM strings; preparation and measurement are
+# then pure NumPy. This is exact for BB84 states measured in a BB84 basis and when no per-qubit
+# quantum attack has rotated the state (honest and PNS runs qualify: PNS splits by photon number
+# and forwards the state untouched). The aer backend (default) is unaffected.
+
+def prepare_codes(bits, bases) -> list[int]:
+    """Prepare a batch of qubits as integer codes (analytic backend)."""
+    return [int(b) | ((2 if basis == "x" else 0)) for b, basis in zip(bits, bases)]
+
+
+def measure_codes(codes, bases, rng: np.random.Generator) -> list[int]:
+    """
+    Measure code-encoded qubits in ``bases`` directly in NumPy (analytic backend).
+
+    Matching basis returns Alice's prepared bit exactly; a mismatched basis returns a uniformly
+    random bit (which is sifted out downstream). Vectorised over all clicks; ``rng`` supplies the
+    mismatched-basis outcomes. Equivalent in distribution to measuring the states with Aer.
+    """
+    codes = np.asarray(codes, dtype=np.int8)
+    if codes.size == 0:
+        return []
+    alice_bit = codes & 1
+    alice_x = (codes & 2) != 0
+    bob_x = np.fromiter((b == "x" for b in bases), dtype=bool, count=len(bases))
+    rand = rng.integers(0, 2, size=codes.size, dtype=np.int8)
+    return np.where(alice_x == bob_x, alice_bit, rand).astype(np.int64).tolist()
+
+
+def prepare_qubits_backend(bits, bases, measurement: str) -> list:
+    """Prepare qubits as QASM strings (aer) or integer codes (analytic)."""
+    return prepare_codes(bits, bases) if measurement == "analytic" else prepare_qubits(bits, bases)
+
+
+def measure_qubits_backend(qubits, bases, measurement: str,
+                           rng: Optional[np.random.Generator] = None) -> list[int]:
+    """Measure a batch with the chosen backend (aer: Qiskit; analytic: NumPy codes)."""
+    if measurement == "analytic":
+        return measure_codes(qubits, bases, rng if rng is not None else np.random.default_rng())
+    return measure_qubits(qubits, bases)
+
+
 # ─────────────────────────────────────────────
 # Eavesdropper Interception (Eve's Attack)
 # ─────────────────────────────────────────────

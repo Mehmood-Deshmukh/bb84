@@ -14,7 +14,7 @@ import argparse
 import sys
 
 from qkd.core.config import ALICE_HOST, BOB_PORT, EVE_PORT, ProtocolParams
-from qkd.services.reporting import eve_console
+from qkd.services.reporting import JsonEventReporter, eve_console
 from qkd.services.wire import accept, connect_with_retry, listen
 from qkd.usecases.eavesdrop_demo import run_eavesdrop
 from qkd.usecases.pns_demo import run_pns
@@ -34,6 +34,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="pns: share of multi-photon pulses forwarded (default: tune to the honest gain)")
     parser.add_argument("--forward-fraction", type=float, default=None,
                         help="pns: share of single-photon pulses forwarded (default: tune to the honest gain)")
+    parser.add_argument("--events", choices=["text", "json"], default="text",
+                        help="Output format (default: text). json emits Eve's metrics as events.")
     args = parser.parse_args(argv)
     if not 0.0 <= args.fraction <= 1.0:
         parser.error("--fraction must be between 0 and 1")
@@ -42,10 +44,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    reporter = eve_console()
     pns = args.attack == "pns"
-    reporter.banner("BB84 QKD - EVE (Eavesdropper / MITM)",
-                    "Photon-Number-Splitting Attack" if pns else "Intercept-Resend Attack")
+    if args.events == "json":
+        reporter = JsonEventReporter()
+    else:
+        reporter = eve_console()
+        reporter.banner("BB84 QKD - EVE (Eavesdropper / MITM)",
+                        "Photon-Number-Splitting Attack" if pns else "Intercept-Resend Attack")
     reporter.section("Setting up Man-in-the-Middle Proxy")
 
     reporter.info(f"Connecting to Bob at {args.bob_host}:{args.bob_port}...")

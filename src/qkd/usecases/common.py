@@ -6,12 +6,15 @@ import math
 from dataclasses import dataclass
 from typing import Literal, Optional, Protocol, runtime_checkable
 
-from qkd.core import decoy
+from qkd.core import decoy, decoy_finitekey
 from qkd.core.bb84_protocol import qber_exceeds_threshold
 from qkd.core.config import ProtocolParams
 from qkd.core.finite_key import binary_entropy, secure_key_length
 from qkd.core.source import DECOY, SIGNAL, VACUUM
 from qkd.services.reporting import Reporter
+
+# Error-correction inefficiency charged in the composable gate's leak_EC model (Lim et al.).
+COMPOSABLE_F_EC = decoy_finitekey.F_EC_DEFAULT
 
 
 class PeerAuthError(Exception):
@@ -229,6 +232,64 @@ def decoy_asymptotic_verdict(
         return secure, None
     reason = (f"decoy asymptotic estimate gives {secure} secure bits, {params.final_key_bits} needed "
               f"(kept signal {kept_signal_bits}, Q1_L/Q_mu {single_fraction:.3f}, e1_U {est.e1_upper:.3%})")
+    if not params.enforce_finite_key:
+        reporter.warning(f"{reason}; continuing because enforce_finite_key is off (key NOT provably secure)")
+        return secure, None
+    reporter.error(reason)
+    return secure, reason
+
+
+def decoy_finite_key_verdict(
+    est: DecoyEstimate, signal_qber: float, params: ProtocolParams, reporter: Reporter,
+    q_x: float = 0.5,
+) -> tuple[int, Optional[str]]:
+    """
+    The composable decoy_finite_key gate: the Lim et al. (2014) finite-key bound
+    (core/decoy_finitekey.py), which — unlike decoy_asymptotic_verdict — accounts for the
+    statistical fluctuations of the measured per-intensity gains and QBERs.
+
+    The symmetric-basis protocol's measurements are mapped to Lim's asymmetric X/Z structure by
+    the basis probabilities: with both peers choosing X with probability q_x (0.5 here), of the
+    clicks_k detections at intensity k a fraction q_x^2 fall in sifted-X events and (1 - q_x)^2 in
+    sifted-Z. The measured per-intensity QBERs (signal from the step-3 sample, decoy/vacuum from
+    the step-2d reveal) set the errors. leak_EC uses Lim's model f_EC n_X h(E_X) (the same one
+    required_N sizes against), so the live gate and the Phase 5a calculator are consistent.
+
+    Both peers compute the same length from the agreed public values and abort (when
+    enforce_finite_key is on) if it is below final_key_bits. Returns (secure_bits, reason|None).
+    """
+    intensities = tuple(float(x) for x in params.intensities)
+    probs = tuple(float(p) for p in params.probs)
+    clicks = [float(c) for c in est.clicks]
+    # Per-intensity error rate: signal from the sample, decoy/vacuum from the reveal.
+    qbers = [signal_qber,
+             est.qbers[DECOY] if est.qbers[DECOY] is not None else 0.0,
+             est.qbers[VACUUM] if est.qbers[VACUUM] is not None else 0.0]
+    fx, fz = q_x * q_x, (1.0 - q_x) * (1.0 - q_x)
+    n_x = tuple(c * fx for c in clicks)
+    n_z = tuple(c * fz for c in clicks)
+    m_x = tuple(c * fx * e for c, e in zip(clicks, qbers))
+    m_z = tuple(c * fz * e for c, e in zip(clicks, qbers))
+    counts = decoy_finitekey.DecoyCounts(intensities, probs, n_x, m_x, n_z, m_z)
+    res = decoy_finitekey.secure_key_length(counts, params.eps_sec, params.eps_cor, COMPOSABLE_F_EC)
+    secure = res.ell
+
+    # A composable single-photon yield for reporting: single-photon detections over the expected
+    # single-photon sifted-X pulses (N_sent q_x^2 tau1). Drops toward 0 under a PNS attack.
+    n_sent = sum(int(s) for s in est.sent)
+    denom = n_sent * fx * decoy_finitekey.tau(1, intensities, probs)
+    comp_y1 = (res.s_x1 / denom) if denom > 0 else 0.0
+    reporter.metrics(secure_key_bits=secure,
+                     decoy_comp_Y1_lower=round(comp_y1, 9),
+                     decoy_comp_s_x1=round(res.s_x1, 3),
+                     decoy_comp_phase_error=round(res.phi_x, 6),
+                     decoy_comp_ell=secure)
+    if secure >= params.final_key_bits:
+        reporter.success(f"Decoy composable bound: {secure} secure bits >= {params.final_key_bits} "
+                         f"(Y1_L {comp_y1:.5f}, phase err {res.phi_x:.4f})")
+        return secure, None
+    reason = (f"decoy composable bound gives {secure} secure bits, {params.final_key_bits} needed "
+              f"(Y1_L {comp_y1:.5f}, s1 {res.s_x1:.0f}, phase err {res.phi_x:.3f})")
     if not params.enforce_finite_key:
         reporter.warning(f"{reason}; continuing because enforce_finite_key is off (key NOT provably secure)")
         return secure, None

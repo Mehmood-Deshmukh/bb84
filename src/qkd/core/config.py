@@ -182,6 +182,37 @@ DECOY_INTENSITIES = _env("DECOY_INTENSITIES", (0.48, 0.1, 0.0), _csv_floats)
 DECOY_PROBS = _env("DECOY_PROBS", (0.7, 0.2, 0.1), _csv_floats)
 validate_decoy_setup(DECOY_INTENSITIES, DECOY_PROBS)
 
+# Measurement backend (core/quantum_channel.py). "aer" (default) prepares and measures every
+# clicked pulse as a one-qubit Qiskit/Aer circuit, exactly as before. "analytic" computes the
+# outcomes directly in NumPy with no Qiskit: it is exact for BB84 states with no per-qubit
+# quantum attack (honest and PNS runs; PNS acts on the photon NUMBER, not the qubit state), and
+# it makes the 1e6-1e7-click decoy finite-key runs tractable, which Aer cannot do. In analytic
+# mode qubits travel the wire as compact integer codes (bit | basis<<1), not QASM strings.
+def _validate_measurement(raw: str) -> str:
+    val = raw.strip().lower()
+    if val not in {"aer", "analytic"}:
+        raise ValueError(f"Invalid measurement: {raw!r}. Allowed: aer, analytic")
+    return val
+
+
+MEASUREMENT = _env("MEASUREMENT", "aer", _validate_measurement)
+
+
+# The decoy security gate. "asymptotic" (default, unchanged) is the Ma et al. point estimate with
+# the finite-key correction terms bolted on. "composable" is the Lim et al. (2014) composable
+# finite-key bound (core/decoy_finitekey.py), which accounts for the statistical fluctuations of
+# the measured per-intensity gains/QBERs. Both peers must select the same gate (it is run-level,
+# set identically on both sides like the channel, and is not negotiated in the hello).
+def _validate_decoy_gate(raw: str) -> str:
+    val = raw.strip().lower()
+    if val not in {"asymptotic", "composable"}:
+        raise ValueError(f"Invalid decoy gate: {raw!r}. Allowed: asymptotic, composable")
+    return val
+
+
+DECOY_GATE = _env("DECOY_GATE", "asymptotic", _validate_decoy_gate)
+
+
 AUTH_MODE = _env("AUTH_MODE", "hybrid", _validate_auth_mode)
 IDENTITY_DIR = _env("IDENTITY_DIR", "identity", str)
 KNOWN_PEERS_FILE = _env("KNOWN_PEERS_FILE", "known_peers.json", str)
@@ -217,6 +248,10 @@ class ProtocolParams:
     source: str = SOURCE
     intensities: tuple = DECOY_INTENSITIES
     probs: tuple = DECOY_PROBS
+    # Simulation/run knobs, not policy (not in the hello): the measurement backend and, for a
+    # decoy source, which finite-key gate decides the abort. Both peers must set them the same.
+    measurement: str = MEASUREMENT
+    decoy_gate: str = DECOY_GATE
 
     @property
     def decoy_enabled(self) -> bool:
