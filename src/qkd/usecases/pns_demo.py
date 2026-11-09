@@ -4,14 +4,16 @@ weak-coherent-source run (SOURCE=wcp or decoy) by splitting photons off multi-ph
 
 Unlike the intercept-resend Eve (eavesdrop_demo.py), a PNS Eve replaces the fibre with a
 lossless line, so she must receive the pulses BEFORE the channel loss. Alice, run in eve-mode
-with a weak-coherent source, hands the whole pre-loss pulse stream to this proxy (send_file's
-pre-loss handoff) instead of the ordinary step-1 qubit message; the proxy runs the attack
-(core/quantum_channel.eve_pns) and forwards an ordinary post-loss step-1 message to Bob, who
-cannot tell the difference. Every classical message is relayed transparently.
+with a weak-coherent source, STREAMS the pre-loss pulses to this proxy in chunks (send_file's
+pre-loss handoff: `preloss_chunk` messages ending with `preloss_end`) instead of the ordinary
+step-1 qubit message; the proxy applies the attack per chunk (core/quantum_channel.pns_accumulate)
+and keeps only the forwarded and stored pulses (a PnsAccumulator, O(detections)), never the whole
+stream, then forwards one ordinary post-loss step-1 message to Bob, who cannot tell the difference.
+This is why the 50 km attack runs in bounded memory. Every classical message is relayed transparently.
 
 Wire handled here (Alice <-> Eve <-> Bob):
   0a/0b hellos (forwarded unchanged; Alice's carries the pre-loss flag so Bob reports detections)
-  1     Alice's pre-loss handoff (Alice -> Eve only); Eve -> Bob an ordinary qubit message
+  1     Alice's streamed pre-loss handoff (Alice -> Eve only, many chunks); Eve -> Bob one qubit message
   2     Bob -> {"bases","detected"} (forwarded); Alice -> matching (forwarded). Eve now knows
         Bob's bases and which detected pulses are sifted, and measures her stored photons in the
         revealed correct basis (she introduced no error, so Bob's QBER stays at the honest level).
@@ -35,7 +37,13 @@ import numpy as np
 
 from qkd.core.channel_model import encode_pulses
 from qkd.core.config import ProtocolParams
-from qkd.core.quantum_channel import eve_passthrough, eve_pns, measure_qubits_backend
+from qkd.core.quantum_channel import (
+    PnsAccumulator,
+    measure_qubits_backend,
+    pns_accumulate,
+    pns_forward_fractions,
+    passthrough_accumulate,
+)
 from qkd.core.source import SIGNAL
 from qkd.services.reporting import Reporter
 from qkd.services.wire import forward_message, recv_json, relay_until_closed, send_json
@@ -68,19 +76,33 @@ def _forward_hellos(alice: socket.socket, bob: socket.socket, reporter: Reporter
     return source
 
 
-def _receive_preloss(alice: socket.socket) -> dict:
-    """Alice's pre-loss handoff: {n, index, labels, photons, qubits} for the pulses with n >= 1."""
-    msg = recv_json(alice)
-    if not isinstance(msg, dict) or not isinstance(msg.get("preloss"), dict):
-        raise ValueError("expected a pre-loss handoff; is Alice running with --eve-mode?")
-    pl = msg["preloss"]
-    return {
-        "n": int(pl["n"]),
-        "index": [int(i) for i in pl["index"]],
-        "labels": [int(c) for c in pl["labels"]],
-        "photons": [int(p) for p in pl["photons"]],
-        "qubits": list(pl["qubits"]),
-    }
+def _stream_preloss(alice: socket.socket, acc: PnsAccumulator, attack: bool, params: ProtocolParams,
+                    mix_i, mix_p, multi_frac: float, single_frac: float,
+                    rng: np.random.Generator) -> tuple[int, int]:
+    """
+    Read Alice's streamed pre-loss handoff chunk by chunk, applying the PNS (or passthrough) rule to
+    each chunk and accumulating only the forwarded and stored pulses in ``acc``. Returns (n_pulses
+    sent, pulses handed with a photon). Eve's memory thus tracks the detections, never N.
+    """
+    handed = 0
+    while True:
+        msg = recv_json(alice)
+        if not isinstance(msg, dict):
+            raise ValueError("expected a pre-loss chunk; is Alice running with --eve-mode?")
+        if "preloss_end" in msg:
+            return int(msg["preloss_end"]["n"]), handed
+        chunk = msg.get("preloss_chunk")
+        if not isinstance(chunk, dict):
+            raise ValueError("expected a pre-loss chunk; is Alice running with --eve-mode?")
+        index = [int(i) for i in chunk["index"]]
+        labels = [int(c) for c in chunk["labels"]]
+        photons = [int(p) for p in chunk["photons"]]
+        qubits = list(chunk["qubits"])
+        handed += len(index)
+        if attack:
+            pns_accumulate(acc, index, labels, photons, qubits, multi_frac, single_frac, rng)
+        else:
+            passthrough_accumulate(acc, index, labels, photons, qubits, params.channel, rng)
 
 
 def run_pns(
@@ -106,20 +128,22 @@ def run_pns(
     source = _forward_hellos(alice, bob, reporter)
     mix_i, mix_p = params.source_mix()
     n_intensities = len(params.intensities)
+    multi_frac, single_frac = (pns_forward_fractions(params.channel, mix_i, mix_p,
+                                                     forward_fraction, multi_fraction)
+                               if attack else (0.0, 0.0))
 
     reporter.section("Phase 1: Photon-Number-Splitting Attack")
-    pl = _receive_preloss(alice)
-    reporter.info(f"Received {len(pl['index'])} pre-loss pulses with a photon ({pl['n']} sent)")
+    acc = PnsAccumulator(n_intensities)
+    n_pulses, handed = _stream_preloss(alice, acc, attack, params, mix_i, mix_p,
+                                       multi_frac, single_frac, rng)
+    plan = acc.to_plan(n_pulses)
+    reporter.info(f"Streamed {handed} pre-loss pulses with a photon ({n_pulses} sent)")
     if attack:
-        plan = eve_pns(pl["index"], pl["labels"], pl["photons"], pl["qubits"], pl["n"],
-                       n_intensities, params.channel, mix_i, mix_p, rng,
-                       forward_fraction=forward_fraction, multi_fraction=multi_fraction)
         reporter.info(f"Split {sum(plan.split)} multi-photon pulses, forwarded "
                       f"{sum(plan.forwarded_single)} single-photon pulses, blocked {sum(plan.blocked)}")
     else:
-        plan = eve_passthrough(pl["index"], pl["photons"], pl["qubits"], pl["n"], params.channel, rng)
         reporter.info(f"Honest control (no splitting): forwarded {len(plan.forward_index)} pulses")
-    send_json(bob, encode_pulses(pl["n"], plan.forward_index, plan.forward_qubits))
+    send_json(bob, encode_pulses(n_pulses, plan.forward_index, plan.forward_qubits))
 
     reporter.section("Phase 2: Forwarding Sifting (Transparent)")
     bob_step2 = json.loads(forward_message(bob, alice))   # Bob's {"bases","detected"}
@@ -128,8 +152,7 @@ def run_pns(
     matching = json.loads(forward_message(alice, bob))    # Alice's matching indices (into detected)
 
     known_signal, sifted_signal = _measure_stored(
-        plan, detected, bob_bases, matching, pl["index"], pl["labels"], source, reporter,
-        params.measurement, rng)
+        plan, detected, bob_bases, matching, source, reporter, params.measurement, rng)
 
     reporter.metrics(eve_known_signal=known_signal, eve_sifted_signal=sifted_signal,
                      eve_known_fraction=round(known_signal / sifted_signal, 6) if sifted_signal else 0.0)
@@ -139,17 +162,17 @@ def run_pns(
                               plan.blocked, plan.forwarded_single, plan.split)
 
 
-def _measure_stored(plan, detected, bob_bases, matching, handed_index, handed_labels, source, reporter,
+def _measure_stored(plan, detected, bob_bases, matching, source, reporter,
                     measurement="aer", rng=None):
     """
     Measure Eve's stored photons at the sifted signal positions, in Bob's revealed basis.
 
     At a sifted position Bob's basis equals Alice's, so measuring the stored photon there returns
     Alice's bit exactly. Returns (bits Eve knows, size of the signal-intensity sifted key).
-    `handed_index`/`handed_labels` are the pre-loss pulses and their intensity labels, so Eve can
-    tell which sifted positions are signal intensity (the key) even when she did not store them.
+    The intensity label of each forwarded pulse (plan.forward_label, parallel to forward_index) lets
+    Eve tell which sifted positions are signal intensity, without her retaining all N pulses.
     """
-    label_by_g = dict(zip(handed_index, handed_labels))
+    label_by_g = dict(zip(plan.forward_index, plan.forward_label))
     bob_basis_by_g = dict(zip(detected, bob_bases))
     stored_qubit_by_g = dict(zip(plan.stored_index, plan.stored_qubits))
 

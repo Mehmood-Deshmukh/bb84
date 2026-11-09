@@ -21,7 +21,7 @@ introducing detectable errors (~25% QBER).
 from __future__ import annotations
 import math
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -214,6 +214,79 @@ class PnsPlan:
     blocked: list[int]
     forwarded_single: list[int]
     split: list[int]
+    # Intensity label of each forwarded pulse (parallel to forward_index). Streaming Eve keeps this
+    # so she can tell which sifted positions are signal intensity without retaining all N pulses.
+    forward_label: list[int] = field(default_factory=list)
+
+
+@dataclass
+class PnsAccumulator:
+    """
+    Eve's running PNS state while the pre-loss pulses arrive in chunks (usecases/pns_demo).
+
+    It grows only with the pulses Eve forwards (O(detections)) and stores (a subset), never with
+    the N pulses Alice sent, so the 50 km attack runs in bounded memory on a laptop. ``to_plan``
+    freezes it into a PnsPlan once the whole stream has been seen.
+    """
+
+    n_intensities: int
+    forward_index: list = field(default_factory=list)
+    forward_qubits: list = field(default_factory=list)
+    forward_label: list = field(default_factory=list)
+    stored_index: list = field(default_factory=list)
+    stored_qubits: list = field(default_factory=list)
+    stored_label: list = field(default_factory=list)
+    blocked: list = field(default_factory=list)
+    forwarded_single: list = field(default_factory=list)
+    split: list = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        for name in ("blocked", "forwarded_single", "split"):
+            if not getattr(self, name):
+                setattr(self, name, [0] * self.n_intensities)
+
+    def to_plan(self, n_pulses: int) -> "PnsPlan":
+        return PnsPlan(n_pulses, self.forward_index, self.forward_qubits, self.stored_index,
+                       self.stored_qubits, self.stored_label, self.blocked, self.forwarded_single,
+                       self.split, self.forward_label)
+
+
+def pns_accumulate(acc: PnsAccumulator, index, labels, photons, qubits,
+                   multi_frac: float, single_frac: float, rng: np.random.Generator) -> None:
+    """
+    Apply the PNS forwarding rule to one chunk of pre-loss pulses, appending to ``acc``.
+
+    Identical decision to eve_pns, one pulse at a time: n >= 2 is forwarded (and a photon stored)
+    with probability multi_frac; n == 1 is forwarded with probability single_frac; otherwise it is
+    blocked. The draw order (one rng.random per pulse) matches eve_pns, so whole-block and chunked
+    runs with the same rng stream agree.
+    """
+    draws = rng.random(len(index))
+    for g, k, n, q, u in zip(index, labels, photons, qubits, draws):
+        k = int(k)
+        if n >= 2:
+            if u < multi_frac:
+                acc.forward_index.append(int(g)); acc.forward_qubits.append(q); acc.forward_label.append(k)
+                acc.stored_index.append(int(g)); acc.stored_qubits.append(q); acc.stored_label.append(k)
+                acc.split[k] += 1
+            else:
+                acc.blocked[k] += 1
+        elif n == 1:
+            if u < single_frac:
+                acc.forward_index.append(int(g)); acc.forward_qubits.append(q); acc.forward_label.append(k)
+                acc.forwarded_single[k] += 1
+            else:
+                acc.blocked[k] += 1
+        else:
+            acc.blocked[k] += 1
+
+
+def passthrough_accumulate(acc: PnsAccumulator, index, labels, photons, qubits,
+                           channel: ChannelParams, rng: np.random.Generator) -> None:
+    """Honest control over one chunk: forward a pulse if any of its photons survives the loss."""
+    for g, k, n, q in zip(index, labels, photons, qubits):
+        if rng.binomial(int(n), channel.eta) >= 1:
+            acc.forward_index.append(int(g)); acc.forward_qubits.append(q); acc.forward_label.append(int(k))
 
 
 def _gain(channel: ChannelParams, mu: float) -> float:
@@ -271,34 +344,9 @@ def eve_pns(
     """
     multi_frac, single_frac = pns_forward_fractions(channel, mix_intensities, mix_probs,
                                                      forward_fraction, multi_fraction)
-    blocked = [0] * n_intensities
-    forwarded_single = [0] * n_intensities
-    split = [0] * n_intensities
-    fwd_index: list[int] = []
-    fwd_qubits: list[Optional[str]] = []
-    stored_index: list[int] = []
-    stored_qubits: list[str] = []
-    stored_label: list[int] = []
-    draws = rng.random(len(index))
-    for g, k, n, q, u in zip(index, labels, photons, qubits, draws):
-        k = int(k)
-        if n >= 2:
-            if u < multi_frac:
-                fwd_index.append(int(g)); fwd_qubits.append(q)
-                stored_index.append(int(g)); stored_qubits.append(q); stored_label.append(k)
-                split[k] += 1
-            else:
-                blocked[k] += 1
-        elif n == 1:
-            if u < single_frac:
-                fwd_index.append(int(g)); fwd_qubits.append(q)
-                forwarded_single[k] += 1
-            else:
-                blocked[k] += 1
-        else:
-            blocked[k] += 1
-    return PnsPlan(n_pulses, fwd_index, fwd_qubits, stored_index, stored_qubits, stored_label,
-                   blocked, forwarded_single, split)
+    acc = PnsAccumulator(n_intensities)
+    pns_accumulate(acc, index, labels, photons, qubits, multi_frac, single_frac, rng)
+    return acc.to_plan(n_pulses)
 
 
 def eve_passthrough(
@@ -313,14 +361,9 @@ def eve_passthrough(
     shows the proxy path itself adds no artefact. (Dark counts, ~Y0, are omitted: Alice hands over
     only pulses with n >= 1, and Y0 is negligible next to the signal gain.)
     """
-    fwd_index: list[int] = []
-    fwd_qubits: list[Optional[str]] = []
-    for g, n, q in zip(index, photons, qubits):
-        if rng.binomial(int(n), channel.eta) >= 1:
-            fwd_index.append(int(g))
-            fwd_qubits.append(q)
-    zero: list[int] = []
-    return PnsPlan(n_pulses, fwd_index, fwd_qubits, [], [], [], zero, zero, zero)
+    acc = PnsAccumulator(1)
+    passthrough_accumulate(acc, index, [0] * len(index), photons, qubits, channel, rng)
+    return acc.to_plan(n_pulses)
 
 
 # ─────────────────────────────────────────────

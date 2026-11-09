@@ -38,7 +38,7 @@ from qkd.core.bb84_protocol import (
 from qkd.core.channel_model import ChannelParams, encode_pulses, sample_clicks
 from qkd.core.config import ProtocolParams
 from qkd.core.quantum_channel import prepare_qubits_backend
-from qkd.core.source import SIGNAL, sample_clicks_decoy, sample_photon_numbers
+from qkd.core.source import sample_clicks_decoy
 from qkd.services.file_stream import describe_file, send_encrypted_file
 from qkd.services.reporting import Reporter
 from qkd.services.resume import ResumeError, chunk_boundary
@@ -71,11 +71,46 @@ class _AliceTx:
     arrays are built there. `labels`/`sent` are None for the single-photon source.
     """
 
-    bits: list[int]
-    bases: list[str]
+    bits: Optional[list[int]]
+    bases: Optional[list[str]]
     labels: Optional[list[int]]
     sent: Optional[list[int]]
     preloss: bool
+    # Pre-loss handoff only: Alice streams the N pulses to Eve in chunks and keeps just the seed and
+    # chunk size, then regenerates bits/bases/labels for the detected pulses in step 2 (so her
+    # memory tracks the detections, not N). bits/bases/labels above are None in that case.
+    seed: Optional[int] = None
+    chunk: Optional[int] = None
+    n_total: Optional[int] = None
+    mix_i: Optional[tuple] = None
+    mix_p: Optional[tuple] = None
+    measurement: str = "aer"
+
+
+# Pulses generated and handed to Eve per chunk, so the pre-loss handoff never materialises all N.
+PRELOSS_CHUNK = 4_000_000
+
+
+def _preloss_chunks(n: int, mix_i, mix_p, seed: int, chunk: int):
+    """
+    Yield (start, labels, photons, bits, bases) for each chunk of the N pre-loss pulses.
+
+    Deterministic in (seed, chunk): a fresh default_rng(seed) walked with the same chunk size draws
+    the same pulses, which is how Alice regenerates the detected pulses in step 2 and how the test
+    checks the streamed attack is reproducible. The per-chunk draw order (labels, photons, bits,
+    bases) is fixed. All arrays are chunk-sized, so working memory is O(chunk), never O(N).
+    """
+    rng = np.random.default_rng(seed)
+    mix_i = np.asarray(mix_i, dtype=float)
+    mix_p = np.asarray(mix_p, dtype=float)
+    k = len(mix_i)
+    for start in range(0, n, chunk):
+        size = min(chunk, n - start)
+        labels = rng.choice(k, size=size, p=mix_p).astype(np.int8)
+        photons = rng.poisson(mix_i[labels]).astype(np.int64)
+        bits = rng.integers(0, 2, size=size, dtype=np.int8)
+        bases = rng.integers(0, 2, size=size, dtype=np.int8)
+        yield start, labels, photons, bits, bases
 
 
 def _transmit_qubits(
@@ -143,35 +178,66 @@ def _transmit_qubits(
 
 def _transmit_preloss(channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter,
                       rng: np.random.Generator, t_sim: float) -> _AliceTx:
-    """Generate the full pre-loss pulse stream and hand it to the Eve proxy (see _transmit_qubits)."""
+    """
+    Stream the N pre-loss pulses to the Eve proxy in chunks (see _transmit_qubits).
+
+    A PNS Eve must see the pulses before the fibre loss, so Alice cannot pre-sample the clicks the
+    way the honest path does. She instead generates and hands over the pulses chunk by chunk, so no
+    N-length array ever exists, and keeps only the seed and chunk size; the per-detected bits are
+    regenerated in step 2 once Bob reports which pulses reached him. Peak memory is O(chunk), not N.
+    """
     n = params.num_qubits
     mix_i, mix_p = params.source_mix()
-    label_arr, photon_arr, sent_arr = sample_photon_numbers(n, mix_i, mix_p, rng)
-    labels = label_arr.tolist()
-    photons = photon_arr.tolist()
-    qrng = rng if params.measurement == "analytic" else None
-    bits = generate_random_bits(n, qrng)
-    bases = generate_random_bases(n, qrng)
+    seed = int(rng.integers(0, 2 ** 63 - 1))
+    chunk = PRELOSS_CHUNK
+    sent = np.zeros(len(mix_i), dtype=np.int64)
+    handed = 0
 
-    reporter.info(f"Eve-mode pre-loss handoff: generating all {n} pulses "
-                  f"({int((photon_arr >= 1).sum())} with a photon)...")
-    with_photon = [i for i in range(n) if photons[i] >= 1]
-    prepared = prepare_qubits_backend([bits[i] for i in with_photon], [bases[i] for i in with_photon],
-                                      params.measurement)
+    reporter.info(f"Eve-mode pre-loss handoff: streaming {n} pulses to Eve in chunks of {chunk}...")
+    sent_before = channel.bytes_sent
+    for start, labels, photons, bits, bases in _preloss_chunks(n, mix_i, mix_p, seed, chunk):
+        sent += np.bincount(labels, minlength=len(mix_i)).astype(np.int64)
+        wp = np.nonzero(photons >= 1)[0]
+        handed += int(wp.size)
+        prepared = prepare_qubits_backend(
+            bits[wp].tolist(), ["x" if b else "+" for b in bases[wp].tolist()], params.measurement)
+        channel.send_untracked({"preloss_chunk": {
+            "index": (wp + start).tolist(),
+            "labels": "".join(str(int(x)) for x in labels[wp]),
+            "photons": photons[wp].tolist(),
+            "qubits": prepared,
+        }})
+    channel.send_untracked({"preloss_end": {"n": n, "sent": sent.tolist()}})
     sim_ms = (time.perf_counter() - t_sim) * 1000
 
-    sent_before = channel.bytes_sent
-    channel.send_untracked({"preloss": {
-        "n": n,
-        "index": with_photon,
-        "labels": "".join(str(labels[i]) for i in with_photon),
-        "photons": [photons[i] for i in with_photon],
-        "qubits": prepared,
-    }})
-    reporter.success(f"Handed {len(with_photon)} pre-loss pulses to Eve")
+    reporter.success(f"Handed {handed} pre-loss pulses to Eve (streamed)")
     reporter.metrics(sim_ms=round(sim_ms, 3), qubit_bytes=channel.bytes_sent - sent_before)
-    # Detected count (metric) and the per-detected arrays are set once Bob reports in step 2.
-    return _AliceTx(bits, bases, labels, sent_arr.tolist(), preloss=True)
+    return _AliceTx(None, None, None, sent.tolist(), preloss=True, seed=seed, chunk=chunk,
+                    n_total=n, mix_i=tuple(mix_i), mix_p=tuple(mix_p), measurement=params.measurement)
+
+
+def _regen_detected(tx: _AliceTx, detected: list[int]) -> tuple[list[int], list[str], list[int]]:
+    """
+    Regenerate Alice's bit, basis and intensity label for each detected global pulse index.
+
+    Re-walks the same seeded chunk stream she handed Eve and extracts only the detected positions,
+    so the working set is O(chunk + detections). Returns (bits, bases, labels) in detected order.
+    """
+    det = np.array(sorted(set(int(g) for g in detected)), dtype=np.int64)
+    by_g: dict[int, tuple[int, str, int]] = {}
+    for start, labels, photons, bits, bases in _preloss_chunks(tx.n_total, tx.mix_i, tx.mix_p, tx.seed, tx.chunk):
+        lo = int(np.searchsorted(det, start))
+        hi = int(np.searchsorted(det, start + len(labels)))
+        if hi > lo:
+            gs = det[lo:hi]
+            local = gs - start
+            for g, b, ba, la in zip(gs.tolist(), bits[local].tolist(),
+                                    bases[local].tolist(), labels[local].tolist()):
+                by_g[int(g)] = (int(b), "x" if ba else "+", int(la))
+    bits_out = [by_g[int(g)][0] for g in detected]
+    bases_out = [by_g[int(g)][1] for g in detected]
+    labels_out = [by_g[int(g)][2] for g in detected]
+    return bits_out, bases_out, labels_out
 
 
 def _sift(channel: TranscriptChannel, tx: _AliceTx,
@@ -193,11 +259,11 @@ def _sift(channel: TranscriptChannel, tx: _AliceTx,
         detected = reply["detected"]
         if not isinstance(detected, list) or len(detected) != len(bob_bases):
             raise ValueError("step 2: detected indices must match the bases count")
-        if any(not isinstance(g, int) or isinstance(g, bool) or not 0 <= g < len(tx.bits) for g in detected):
+        if any(not isinstance(g, int) or isinstance(g, bool) or not 0 <= g < tx.n_total for g in detected):
             raise ValueError("step 2: detected index out of range")
-        det_bits = [tx.bits[g] for g in detected]
-        det_bases = [tx.bases[g] for g in detected]
-        det_labels: Optional[list[int]] = [tx.labels[g] for g in detected] if tx.labels is not None else None
+        # Regenerate only the detected pulses from the handoff seed (O(detections), not N).
+        det_bits, det_bases, det_labels = _regen_detected(tx, detected)
+        det_labels: Optional[list[int]] = det_labels
         reporter.metrics(detected=len(detected))
     else:
         bob_bases = reply
