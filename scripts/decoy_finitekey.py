@@ -251,12 +251,10 @@ def plot(sweeps: dict[str, list[dict]], out_pdf: Path, n_ref: float) -> dict:
         ax.set_xlabel("Fibre length (km)")
     axes[0].set_ylabel("Secure key rate per pulse")
     axes[0].legend(loc="lower left")
-    fig.suptitle(f"Decoy-state BB84: composable finite-key (q_x=0.5, N={n_ref:.0e}) vs asymptotic rate",
-                 fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.tight_layout()
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_pdf)
-    fig.savefig(out_pdf.with_suffix(".png"), dpi=150)
+    fig.savefig(out_pdf, bbox_inches="tight")
+    fig.savefig(out_pdf.with_suffix(".png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
     return maxima
 

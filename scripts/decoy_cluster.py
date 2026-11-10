@@ -19,6 +19,12 @@ is tractable):
   d5_required_n    at GYS 25 km, N swept 0.25x..4x of the required N; the fraction of runs that
                    yield a 256-bit key should cross 1/2 around the computed required N, validating
                    the Phase 5a calculator against live runs.
+  d6_wcp_pns       the insecure no-decoy baseline under the same PNS attack (SOURCE=wcp, GYS 0/25
+                   km). The single-photon (Tomamichel) finite-key gate ignores the per-intensity
+                   gains, so the attacked run COMPLETES and delivers the file at the honest QBER
+                   floor while Eve holds a large share of the sifted key (eve_known_fraction) --
+                   the measured counterpart to the decoy defence. N is sized so the honest gate
+                   clears 256 bits with wide margin (so every attacked run delivers).
 
 The required N per point is read from the Phase 5a calculator (core/decoy_finitekey.required_N),
 never hardcoded; the decoy intensities/probs are optimised per point for the symmetric-basis
@@ -68,6 +74,14 @@ DISTANCES = (0.0, 25.0, 50.0)
 EPS_SEC, EPS_COR, Q_X = 1e-10, 1e-15, 0.5
 SWEEP_FACTORS = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
 SWEEP_PRESET, SWEEP_DISTANCE = "GYS", 25.0
+# d6 no-decoy baseline: a wcp laser at the signal intensity only (probs ignored; source_mix uses
+# intensities[0]). N per point is sized so the honest single-photon finite-key gate clears 256 bits
+# with ~14x/26x margin (validated: honest ell ~3600 at 0 km, ~6630 at 25 km), so every attacked run
+# delivers. It is NOT the decoy calculator's required N -- wcp runs the Tomamichel gate, not decoy.
+D6_WCP_DISTANCES = (0.0, 25.0)
+D6_WCP_N = {0.0: 2_000_000, 25.0: 10_000_000}
+D6_WCP_INTENSITIES = (0.48, 0.1, 0.0)
+D6_WCP_PROBS = (0.7, 0.2, 0.1)
 PROCESS_TIMEOUT = 1800.0
 PALETTE = {"GYS": "#2a78d6", "KTH": "#eb6834", "mark": "#1baf7a"}
 
@@ -114,7 +128,7 @@ def _env_for(task: dict) -> dict:
     p1, p2, p3 = task["probs"]
     env = dict(os.environ)
     env.update({
-        "QKD_SOURCE": "decoy",
+        "QKD_SOURCE": task.get("source", "decoy"),
         "QKD_DECOY_INTENSITIES": f"{mu1},{mu2},{mu3}",
         "QKD_DECOY_PROBS": f"{p1},{p2},{p3}",
         "QKD_CHANNEL_PRESET": task["preset"],
@@ -205,7 +219,8 @@ def run_task(task: dict) -> dict:
         "exp": task["exp"], "preset": task["preset"], "length_km": task["length_km"],
         "attack": task["attack"], "repeat": task["repeat"], "n_pulses": int(task["n_pulses"]),
         "required_N": int(task["required_N"]), "n_over_required": round(task["n_pulses"] / task["required_N"], 4),
-        "stopped_at": stopped, "key_produced": key_produced,
+        "source": task.get("source", "decoy"),
+        "stopped_at": stopped, "key_produced": key_produced, "file_delivered": int(intact),
         "secure_key_bits": metric("secure_key_bits"),
         "decoy_comp_Y1_lower": metric("decoy_comp_Y1_lower"),
         "decoy_comp_phase_error": metric("decoy_comp_phase_error"),
@@ -224,12 +239,13 @@ def build_tasks(experiments: list[str], repeats: int, payload_bytes: int, work_r
                 plans: dict, distances=DISTANCES) -> list[dict]:
     tasks: list[dict] = []
 
-    def add(exp, preset_name, length, attack, n_pulses, required_N, intensities, probs, reps):
+    def add(exp, preset_name, length, attack, n_pulses, required_N, intensities, probs, reps,
+            source="decoy"):
         for r in range(reps):
             tasks.append({
                 "exp": exp, "preset": preset_name, "length_km": length, "attack": attack,
                 "n_pulses": n_pulses, "required_N": required_N, "intensities": intensities,
-                "probs": probs, "repeat": r, "payload_bytes": payload_bytes,
+                "probs": probs, "repeat": r, "payload_bytes": payload_bytes, "source": source,
                 "work": str(work_root / f"{exp}_{preset_name}_{length:g}_{attack}_{n_pulses}_{r}"),
             })
 
@@ -252,6 +268,12 @@ def build_tasks(experiments: list[str], repeats: int, payload_bytes: int, work_r
             n = max(1000, int(plan["required_N"] * factor))
             add("d5_required_n", SWEEP_PRESET, SWEEP_DISTANCE, "none", n, plan["required_N"],
                 plan["intensities"], plan["probs"], 10)
+
+    if "d6_wcp_pns" in experiments:
+        for length in D6_WCP_DISTANCES:
+            n = D6_WCP_N[length]
+            add("d6_wcp_pns", "GYS", length, "pns", n, n,
+                D6_WCP_INTENSITIES, D6_WCP_PROBS, repeats, source="wcp")
     return tasks
 
 
@@ -276,10 +298,19 @@ def reduce_rows(rows: list[dict]) -> list[dict]:
         vals = [v for v in vals if v is not None]
         return round(float(np.median(vals)), 6) if vals else None
 
+    def mn(vals):
+        vals = [v for v in vals if v is not None]
+        return round(float(min(vals)), 6) if vals else None
+
+    def mx(vals):
+        vals = [v for v in vals if v is not None]
+        return round(float(max(vals)), 6) if vals else None
+
     out = []
     for (exp, preset_name, length, attack, n_pulses), g in sorted(groups.items()):
         n = len(g)
         successes = sum(int(_f(r, "key_produced") or 0) for r in g)
+        delivered = sum(int(_f(r, "file_delivered") or 0) for r in g)
         lo, hi = wilson(successes, n)
         req = int(g[0]["required_N"])
         out.append({
@@ -287,6 +318,7 @@ def reduce_rows(rows: list[dict]) -> list[dict]:
             "n_pulses": n_pulses, "required_N": req, "n_over_required": round(n_pulses / req, 4),
             "runs": n, "key_produced": successes, "key_rate": round(successes / n, 4),
             "key_rate_wilson_lo": round(lo, 4), "key_rate_wilson_hi": round(hi, 4),
+            "file_delivered": delivered, "file_delivered_rate": round(delivered / n, 4),
             "ell_median": med([_f(r, "secure_key_bits") for r in g]),
             "comp_Y1_lower_median": med([_f(r, "decoy_comp_Y1_lower") for r in g]),
             "asym_Y1_lower_median": med([_f(r, "decoy_Y1_lower") for r in g]),
@@ -294,6 +326,8 @@ def reduce_rows(rows: list[dict]) -> list[dict]:
             "gain_decoy_median": med([_f(r, "decoy_gain_decoy") for r in g]),
             "qber_median": med([_f(r, "qber") for r in g]),
             "eve_known_fraction_median": med([_f(r, "eve_known_fraction") for r in g]),
+            "eve_known_fraction_min": mn([_f(r, "eve_known_fraction") for r in g]),
+            "eve_known_fraction_max": mx([_f(r, "eve_known_fraction") for r in g]),
             "stopped_at_mode": max(set(r["stopped_at"] for r in g), key=lambda s: sum(x["stopped_at"] == s for x in g)),
             "wall_s_median": med([_f(r, "wall_s") for r in g]),
         })
@@ -334,7 +368,7 @@ def plot_required_n(summary: list[dict], out_pdf: Path) -> None:
     req = int(sweep[0]["required_N"])
     fig, ax = plt.subplots(figsize=(6.2, 4.2))
     ax.fill_between(x, lo, hi, color=PALETTE["GYS"], alpha=0.18, label="Wilson 95%")
-    ax.plot(x, y, "o-", color=PALETTE["GYS"], lw=1.8, label="256-bit key rate (live)")
+    ax.plot(x, y, "o-", color=PALETTE["GYS"], lw=1.8, label="256-bit key rate")
     ax.axvline(1.0, color=PALETTE["mark"], ls="--", lw=1.2, label=f"computed required N = {req:,}")
     ax.axhline(0.5, color="#8a8985", ls=":", lw=0.8)
     ax.set_xscale("log")
@@ -344,13 +378,12 @@ def plot_required_n(summary: list[dict], out_pdf: Path) -> None:
     ax.set_xlabel("Block size N / required N (GYS, 25 km)")
     ax.set_ylabel("Fraction of runs yielding a 256-bit key")
     ax.set_ylim(-0.03, 1.03)
-    ax.set_title("Live 256-bit success vs the Phase 5a required N", fontweight="bold")
     ax.legend(loc="lower right", fontsize=8, frameon=False)
     ax.grid(True, color="#e4e3df", lw=0.6)
     fig.tight_layout()
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_pdf)
-    fig.savefig(out_pdf.with_suffix(".png"), dpi=150)
+    fig.savefig(out_pdf, bbox_inches="tight")
+    fig.savefig(out_pdf.with_suffix(".png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
