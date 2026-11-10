@@ -441,7 +441,8 @@ def plot_pns_partial(summary: list[dict], out_pdf: Path) -> Optional[float]:
         ax.text(gstar, max(y1) * 0.96, f" g* = {gstar:g}", color=PALETTE["mark"], fontsize=8,
                 ha="left", va="top")
     lines = ax.get_lines()[:1] + ax2.get_lines()[:1]
-    ax.legend(lines, [ln.get_label() for ln in lines], loc="lower left", fontsize=8, frameon=False)
+    ax.legend(lines, [ln.get_label() for ln in lines], loc="upper right", fontsize=8,
+              frameon=True, framealpha=1)
     ax.grid(True, color="#e4e3df", lw=0.6)
     fig.tight_layout()
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
