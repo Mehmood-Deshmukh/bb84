@@ -35,7 +35,7 @@ GYS_0 = preset("GYS", 0)
 
 
 def _run_attack(parallel, src, out_dir, keys, params, *, attack=True, forward_fraction=None,
-                multi_fraction=None, mode="hybrid"):
+                multi_fraction=None, strength=1.0, mode="hybrid"):
     """Alice (eve-mode) <-> PNS Eve proxy <-> Bob, over two socket pairs. Returns the three results."""
     alice_rep, bob_rep, eve_rep = RecordingReporter(), RecordingReporter(), RecordingReporter()
     alice_end, eve_a = socket.socketpair()
@@ -48,7 +48,7 @@ def _run_attack(parallel, src, out_dir, keys, params, *, attack=True, forward_fr
                                                    context(keys, "bob", mode)))(bob_end),
             lambda: guarded(lambda s: run_pns(s, eve_b, eve_rep, params, attack=attack, seed=7,
                                               forward_fraction=forward_fraction,
-                                              multi_fraction=multi_fraction))(eve_a),
+                                              multi_fraction=multi_fraction, strength=strength))(eve_a),
         )
     return (alice_res, alice_rep), (bob_res, bob_rep), (eve_res, eve_rep)
 
@@ -98,6 +98,34 @@ def test_decoy_pns_aborts_at_decoy_gate(keys, parallel, make_file, tmp_path: Pat
     honest_signal = decoy.gain(GYS_25, 0.48)
     assert a["decoy_gains"][0] > 3 * honest_signal          # gains pulled far from honest
     assert e_res.source == "decoy"
+
+
+def test_partial_pns_degrades_smoothly(keys, parallel, make_file, tmp_path: Path) -> None:
+    # The partial attack (strength g): Eve PNS-attacks a fraction g of the pulses and passes the
+    # rest through honestly. As g rises Eve learns more of the sifted key and the signal gain is
+    # pulled further from honest (so Y1_L falls), while she introduces no error -- QBER stays flat.
+    # enforce_finite_key is off so every g completes and we can read the measured quantities.
+    params = ProtocolParams(num_qubits=2 ** 21, channel=GYS_25, source="decoy", reconciliation="cascade",
+                            enforce_finite_key=False, measurement="analytic")
+    src = make_file("payload.bin", 2_000)
+    known, qbers, y1 = {}, {}, {}
+    for g in (0.0, 0.5, 1.0):
+        (a_res, a_rep), (b_res, _), (e_res, _) = _run_attack(
+            parallel, src, tmp_path / f"r{g}", keys, params, strength=g, multi_fraction=1.0)
+        assert not isinstance(a_res, Exception), a_res
+        assert not isinstance(b_res, Exception), b_res
+        known[g] = e_res.known_fraction
+        qbers[g] = a_rep.merged()["qber"]
+        y1[g] = a_rep.merged()["decoy_Y1_lower"]
+
+    # g=0 is the honest control (Eve stores nothing); g=1 is the maximal attack (she knows ~all).
+    assert known[0.0] == 0.0
+    assert known[1.0] > 0.9
+    # Known fraction rises monotonically and Y1_L falls monotonically with g.
+    assert known[0.0] < known[0.5] < known[1.0]
+    assert y1[0.0] > y1[0.5] > y1[1.0]
+    # QBER stays at the honest floor for every g (Eve forwards states unchanged).
+    assert all(q == pytest.approx(0.033, abs=0.02) for q in qbers.values())
 
 
 def test_honest_control_through_proxy_reproduces_gains(keys, parallel, make_file, same_file, tmp_path: Path) -> None:

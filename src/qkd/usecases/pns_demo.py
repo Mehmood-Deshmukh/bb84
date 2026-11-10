@@ -78,11 +78,18 @@ def _forward_hellos(alice: socket.socket, bob: socket.socket, reporter: Reporter
 
 def _stream_preloss(alice: socket.socket, acc: PnsAccumulator, attack: bool, params: ProtocolParams,
                     mix_i, mix_p, multi_frac: float, single_frac: float,
-                    rng: np.random.Generator) -> tuple[int, int]:
+                    rng: np.random.Generator, strength: float = 1.0,
+                    split_rng: Optional[np.random.Generator] = None) -> tuple[int, int]:
     """
     Read Alice's streamed pre-loss handoff chunk by chunk, applying the PNS (or passthrough) rule to
     each chunk and accumulating only the forwarded and stored pulses in ``acc``. Returns (n_pulses
     sent, pulses handed with a photon). Eve's memory thus tracks the detections, never N.
+
+    ``strength`` g in [0, 1] is the partial-attack knob: each handed pulse is attacked (PNS) with
+    probability g (drawn from ``split_rng``, independent of the forwarding ``rng``) and otherwise
+    passed through the honest channel loss. g >= 1 is the full attack and does not touch split_rng,
+    so it reproduces the maximal attack's stream exactly; g <= 0 is the honest control. Either way
+    Eve forwards states unchanged, so Bob sees no extra error at any g.
     """
     handed = 0
     while True:
@@ -99,10 +106,21 @@ def _stream_preloss(alice: socket.socket, acc: PnsAccumulator, attack: bool, par
         photons = [int(p) for p in chunk["photons"]]
         qubits = list(chunk["qubits"])
         handed += len(index)
-        if attack:
+        if not attack or strength <= 0.0:
+            passthrough_accumulate(acc, index, labels, photons, qubits, params.channel, rng)
+        elif strength >= 1.0:
             pns_accumulate(acc, index, labels, photons, qubits, multi_frac, single_frac, rng)
         else:
-            passthrough_accumulate(acc, index, labels, photons, qubits, params.channel, rng)
+            # Partial attack: PNS a fraction g of the pulses, pass the rest through honestly.
+            mask = split_rng.random(len(index)) < strength
+            att = [j for j, m in enumerate(mask) if m]
+            pas = [j for j, m in enumerate(mask) if not m]
+            pns_accumulate(acc, [index[j] for j in att], [labels[j] for j in att],
+                           [photons[j] for j in att], [qubits[j] for j in att],
+                           multi_frac, single_frac, rng)
+            passthrough_accumulate(acc, [index[j] for j in pas], [labels[j] for j in pas],
+                                   [photons[j] for j in pas], [qubits[j] for j in pas],
+                                   params.channel, rng)
 
 
 def run_pns(
@@ -114,6 +132,7 @@ def run_pns(
     attack: bool = True,
     forward_fraction: Optional[float] = None,
     multi_fraction: Optional[float] = None,
+    strength: float = 1.0,
     seed: Optional[int] = None,
 ) -> PnsEavesdropResult:
     """
@@ -123,8 +142,12 @@ def run_pns(
     survivors without splitting, which reproduces the honest gains. `forward_fraction` and
     `multi_fraction` override the single- and multi-photon forwarding rates (see eve_pns); the
     defaults match Bob's overall gain to the honest channel while maximising what Eve learns.
+    `strength` g in [0, 1] is the partial-attack knob: Eve PNS-attacks a fraction g of the pulses
+    and passes the rest through honestly (g=1 the full attack, g=0 the honest control). As g rises
+    the decoy single-photon-yield bound degrades smoothly; Bob's QBER stays at the honest floor.
     """
     rng = np.random.default_rng(seed)
+    split_rng = np.random.default_rng(None if seed is None else seed + 1)
     source = _forward_hellos(alice, bob, reporter)
     mix_i, mix_p = params.source_mix()
     n_intensities = len(params.intensities)
@@ -135,7 +158,7 @@ def run_pns(
     reporter.section("Phase 1: Photon-Number-Splitting Attack")
     acc = PnsAccumulator(n_intensities)
     n_pulses, handed = _stream_preloss(alice, acc, attack, params, mix_i, mix_p,
-                                       multi_frac, single_frac, rng)
+                                       multi_frac, single_frac, rng, strength, split_rng)
     plan = acc.to_plan(n_pulses)
     reporter.info(f"Streamed {handed} pre-loss pulses with a photon ({n_pulses} sent)")
     if attack:
@@ -143,7 +166,15 @@ def run_pns(
                       f"{sum(plan.forwarded_single)} single-photon pulses, blocked {sum(plan.blocked)}")
     else:
         reporter.info(f"Honest control (no splitting): forwarded {len(plan.forward_index)} pulses")
-    send_json(bob, encode_pulses(n_pulses, plan.forward_index, plan.forward_qubits))
+    # A partial attack (0 < g < 1) routes each pulse to the attack or passthrough accumulator, so a
+    # chunk's forwarded pulses land out of global order; Bob needs strictly increasing indices. The
+    # full attack and honest control stream in order already, so they skip the sort.
+    fwd_index, fwd_qubits = plan.forward_index, plan.forward_qubits
+    if attack and 0.0 < strength < 1.0:
+        order = sorted(range(len(fwd_index)), key=fwd_index.__getitem__)
+        fwd_index = [fwd_index[j] for j in order]
+        fwd_qubits = [fwd_qubits[j] for j in order]
+    send_json(bob, encode_pulses(n_pulses, fwd_index, fwd_qubits))
 
     reporter.section("Phase 2: Forwarding Sifting (Transparent)")
     bob_step2 = json.loads(forward_message(bob, alice))   # Bob's {"bases","detected"}
@@ -155,6 +186,7 @@ def run_pns(
         plan, detected, bob_bases, matching, source, reporter, params.measurement, rng)
 
     reporter.metrics(eve_known_signal=known_signal, eve_sifted_signal=sifted_signal,
+                     eve_pns_strength=round(float(strength), 4),
                      eve_known_fraction=round(known_signal / sifted_signal, 6) if sifted_signal else 0.0)
     reporter.section("Phase 3: Relaying the Remainder")
     relay_until_closed(alice, bob)

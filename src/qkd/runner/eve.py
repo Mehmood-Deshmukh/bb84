@@ -34,11 +34,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="pns: share of multi-photon pulses forwarded (default: tune to the honest gain)")
     parser.add_argument("--forward-fraction", type=float, default=None,
                         help="pns: share of single-photon pulses forwarded (default: tune to the honest gain)")
+    parser.add_argument("--pns-strength", type=float, default=1.0,
+                        help="pns: partial-attack strength g in [0,1] -- PNS a fraction g of pulses, "
+                             "pass the rest through honestly (default: 1.0, the full attack)")
     parser.add_argument("--events", choices=["text", "json"], default="text",
                         help="Output format (default: text). json emits Eve's metrics as events.")
     args = parser.parse_args(argv)
     if not 0.0 <= args.fraction <= 1.0:
         parser.error("--fraction must be between 0 and 1")
+    if not 0.0 <= args.pns_strength <= 1.0:
+        parser.error("--pns-strength must be between 0 and 1")
     return args
 
 
@@ -63,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
                 reporter.info(f"Alice connected from {addr}")
                 if pns:
                     run_pns(alice, bob, reporter, ProtocolParams(),
-                            forward_fraction=args.forward_fraction, multi_fraction=args.multi_fraction)
+                            forward_fraction=args.forward_fraction, multi_fraction=args.multi_fraction,
+                            strength=args.pns_strength)
                 else:
                     run_eavesdrop(alice, bob, reporter, fraction=args.fraction)
     return 0

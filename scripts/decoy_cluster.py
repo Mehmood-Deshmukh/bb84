@@ -25,6 +25,11 @@ is tractable):
                    floor while Eve holds a large share of the sifted key (eve_known_fraction) --
                    the measured counterpart to the decoy defence. N is sized so the honest gate
                    clears 256 bits with wide margin (so every attacked run delivers).
+  d7_pns_partial   GYS 25 km decoy under a PARTIAL PNS attack, strength g swept 0..1 (Eve attacks a
+                   fraction g of the pulses, passes the rest through honestly). Shows the composable
+                   bound degrading smoothly -- Y1_L and ell fall, the key rate drops 1 -> 0 at some
+                   g*, Eve's known fraction rises -- while the QBER stays at the honest floor. Run
+                   at 2x the required N so g=0 is a solidly secure key rate and g* is well defined.
 
 The required N per point is read from the Phase 5a calculator (core/decoy_finitekey.required_N),
 never hardcoded; the decoy intensities/probs are optimised per point for the symmetric-basis
@@ -82,6 +87,13 @@ D6_WCP_DISTANCES = (0.0, 25.0)
 D6_WCP_N = {0.0: 2_000_000, 25.0: 10_000_000}
 D6_WCP_INTENSITIES = (0.48, 0.1, 0.0)
 D6_WCP_PROBS = (0.7, 0.2, 0.1)
+# d7 partial-PNS sweep: GYS 25 km, decoy source, composable gate, Eve PNS-attacks a fraction g of
+# the pulses (g in D7_STRENGTHS) and passes the rest through honestly, so the decoy bound degrades
+# smoothly. Run at D7_N_MULTIPLIER x the required N so the honest end (g=0) is a solidly secure
+# key_rate ~ 1 and the secure->broken transition (g*) is well defined (at exactly 1x required N the
+# honest key_rate is ~0.5 by construction, so g* would sit at 0 and be uninformative).
+D7_STRENGTHS = tuple(round(0.1 * i, 1) for i in range(11))  # 0.0, 0.1, ..., 1.0
+D7_N_MULTIPLIER = 2.0
 PROCESS_TIMEOUT = 1800.0
 PALETTE = {"GYS": "#2a78d6", "KTH": "#eb6834", "mark": "#1baf7a"}
 
@@ -176,6 +188,7 @@ def run_task(task: dict) -> dict:
             alice_eve = ["--eve-mode"]
             eve = subprocess.Popen(
                 runner("eve", "--attack", "pns", "--events", "json",
+                       "--pns-strength", str(task.get("pns_strength", 1.0)),
                        "--bob-port", str(bob_port), "--listen-port", str(alice_port)),
                 env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
             procs.append(eve)
@@ -219,7 +232,7 @@ def run_task(task: dict) -> dict:
         "exp": task["exp"], "preset": task["preset"], "length_km": task["length_km"],
         "attack": task["attack"], "repeat": task["repeat"], "n_pulses": int(task["n_pulses"]),
         "required_N": int(task["required_N"]), "n_over_required": round(task["n_pulses"] / task["required_N"], 4),
-        "source": task.get("source", "decoy"),
+        "source": task.get("source", "decoy"), "pns_strength": task.get("pns_strength", 1.0),
         "stopped_at": stopped, "key_produced": key_produced, "file_delivered": int(intact),
         "secure_key_bits": metric("secure_key_bits"),
         "decoy_comp_Y1_lower": metric("decoy_comp_Y1_lower"),
@@ -240,13 +253,14 @@ def build_tasks(experiments: list[str], repeats: int, payload_bytes: int, work_r
     tasks: list[dict] = []
 
     def add(exp, preset_name, length, attack, n_pulses, required_N, intensities, probs, reps,
-            source="decoy"):
+            source="decoy", strength=1.0):
         for r in range(reps):
             tasks.append({
                 "exp": exp, "preset": preset_name, "length_km": length, "attack": attack,
                 "n_pulses": n_pulses, "required_N": required_N, "intensities": intensities,
                 "probs": probs, "repeat": r, "payload_bytes": payload_bytes, "source": source,
-                "work": str(work_root / f"{exp}_{preset_name}_{length:g}_{attack}_{n_pulses}_{r}"),
+                "pns_strength": strength,
+                "work": str(work_root / f"{exp}_{preset_name}_{length:g}_{attack}_{n_pulses}_g{strength:g}_{r}"),
             })
 
     for preset_name in PRESETS:
@@ -274,6 +288,13 @@ def build_tasks(experiments: list[str], repeats: int, payload_bytes: int, work_r
             n = D6_WCP_N[length]
             add("d6_wcp_pns", "GYS", length, "pns", n, n,
                 D6_WCP_INTENSITIES, D6_WCP_PROBS, repeats, source="wcp")
+
+    if "d7_pns_partial" in experiments:
+        plan = plans[(SWEEP_PRESET, SWEEP_DISTANCE)]      # GYS 25 km
+        n = int(plan["required_N"] * D7_N_MULTIPLIER)
+        for g in D7_STRENGTHS:
+            add("d7_pns_partial", SWEEP_PRESET, SWEEP_DISTANCE, "pns", n, plan["required_N"],
+                plan["intensities"], plan["probs"], repeats, strength=g)
     return tasks
 
 
@@ -291,7 +312,8 @@ def reduce_rows(rows: list[dict]) -> list[dict]:
     """Aggregate rows by (exp, preset, length, attack, n_pulses) into summary rows."""
     groups: dict[tuple, list[dict]] = {}
     for row in rows:
-        key = (row["exp"], row["preset"], float(row["length_km"]), row["attack"], int(row["n_pulses"]))
+        s = _f(row, "pns_strength")
+        key = (row["exp"], row["preset"], float(row["length_km"]), row["attack"], int(row["n_pulses"]), s)
         groups.setdefault(key, []).append(row)
 
     def med(vals):
@@ -307,7 +329,8 @@ def reduce_rows(rows: list[dict]) -> list[dict]:
         return round(float(max(vals)), 6) if vals else None
 
     out = []
-    for (exp, preset_name, length, attack, n_pulses), g in sorted(groups.items()):
+    for (exp, preset_name, length, attack, n_pulses, strength), g in sorted(
+            groups.items(), key=lambda kv: tuple(map(str, kv[0]))):
         n = len(g)
         successes = sum(int(_f(r, "key_produced") or 0) for r in g)
         delivered = sum(int(_f(r, "file_delivered") or 0) for r in g)
@@ -315,6 +338,7 @@ def reduce_rows(rows: list[dict]) -> list[dict]:
         req = int(g[0]["required_N"])
         out.append({
             "exp": exp, "preset": preset_name, "length_km": length, "attack": attack,
+            "pns_strength": strength if strength is not None else "",
             "n_pulses": n_pulses, "required_N": req, "n_over_required": round(n_pulses / req, 4),
             "runs": n, "key_produced": successes, "key_rate": round(successes / n, 4),
             "key_rate_wilson_lo": round(lo, 4), "key_rate_wilson_hi": round(hi, 4),
@@ -385,6 +409,46 @@ def plot_required_n(summary: list[dict], out_pdf: Path) -> None:
     fig.savefig(out_pdf, bbox_inches="tight")
     fig.savefig(out_pdf.with_suffix(".png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_pns_partial(summary: list[dict], out_pdf: Path) -> Optional[float]:
+    """Y1_L and the 256-bit key rate vs the PNS strength g (GYS 25 km). Returns g* or None."""
+    rows = [r for r in summary if r["exp"] == "d7_pns_partial"]
+    if not rows:
+        return None
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    rows.sort(key=lambda r: float(r["pns_strength"]))
+    g = [float(r["pns_strength"]) for r in rows]
+    y1 = [float(r["comp_Y1_lower_median"]) for r in rows]
+    kr = [float(r["key_rate"]) for r in rows]
+    gstar = next((gg for gg, k in zip(g, kr) if k < 1.0), None)  # first g with any abort
+
+    fig, ax = plt.subplots(figsize=(6.2, 4.2))
+    ax.plot(g, y1, "o-", color=PALETTE["GYS"], lw=1.8, label=r"composable $Y_1^L$ (median)")
+    ax.set_xlabel("PNS attack strength $g$")
+    ax.set_ylabel(r"Single-photon yield bound $Y_1^L$", color=PALETTE["GYS"])
+    ax.tick_params(axis="y", labelcolor=PALETTE["GYS"])
+    ax.set_ylim(bottom=0.0)
+    ax2 = ax.twinx()
+    ax2.plot(g, kr, "s--", color=PALETTE["KTH"], lw=1.6, label="256-bit key rate")
+    ax2.set_ylabel("Fraction of runs yielding a 256-bit key", color=PALETTE["KTH"])
+    ax2.tick_params(axis="y", labelcolor=PALETTE["KTH"])
+    ax2.set_ylim(-0.03, 1.03)
+    if gstar is not None:
+        ax.axvline(gstar, color=PALETTE["mark"], ls=":", lw=1.2)
+        ax.text(gstar, max(y1) * 0.96, f" g* = {gstar:g}", color=PALETTE["mark"], fontsize=8,
+                ha="left", va="top")
+    lines = ax.get_lines()[:1] + ax2.get_lines()[:1]
+    ax.legend(lines, [ln.get_label() for ln in lines], loc="lower left", fontsize=8, frameon=False)
+    ax.grid(True, color="#e4e3df", lw=0.6)
+    fig.tight_layout()
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_pdf, bbox_inches="tight")
+    fig.savefig(out_pdf.with_suffix(".png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return gstar
 
 
 # ── slurm ────────────────────────────────────────────────────────────────────
@@ -466,6 +530,9 @@ def main(argv=None) -> int:
         summary = reduce_rows(rows)
         write_csv(args.reduce / "summary.csv", summary)
         plot_required_n(summary, ROOT / "experiments" / "figures" / "decoy_required_n.pdf")
+        gstar = plot_pns_partial(summary, ROOT / "experiments" / "figures" / "decoy_pns_partial.pdf")
+        if gstar is not None:
+            print(f"d7 partial-PNS figure written; g* (gate begins to abort) = {gstar:g}")
         print(f"summary: {args.reduce / 'summary.csv'}  ({len(summary)} rows)")
         return 0
 
@@ -512,6 +579,9 @@ def main(argv=None) -> int:
     if any(r["exp"] == "d5_required_n" for r in allrows):
         plot_required_n(reduce_rows(allrows), ROOT / "experiments" / "figures" / "decoy_required_n.pdf")
         print(f"figure: {ROOT / 'experiments' / 'figures' / 'decoy_required_n.pdf'}")
+    if any(r["exp"] == "d7_pns_partial" for r in allrows):
+        gstar = plot_pns_partial(reduce_rows(allrows), ROOT / "experiments" / "figures" / "decoy_pns_partial.pdf")
+        print(f"figure: {ROOT / 'experiments' / 'figures' / 'decoy_pns_partial.pdf'}  (g* = {gstar})")
     return 0
 
 
