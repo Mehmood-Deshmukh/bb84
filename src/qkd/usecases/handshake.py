@@ -4,8 +4,9 @@ Signed hello/finished handshake around the BB84 exchange (wire steps 0a, 0b, and
   0a A->B {"hello": {...}}      tracked in the transcript
   0b B->A {"hello": {...}}      tracked
   4b B->A, then A->B {"finished": sig, "confirm": tag}   untracked; sign and hybrid modes only
-      With resume on, each finished also carries "resume": 1. The flag is not covered by the
-      signature: it can only switch resume off (or stall it), see usecases/resume.py.
+      With resume on, each finished also carries "resume": 1, and the signature then also covers
+      RESUME_SUFFIX. Stripping or adding the flag in transit therefore fails the signature
+      (PeerAuthError at 4b). Without the flag the signed bytes are those of a plain transfer.
 
 Every hello carries the sender's security policy (ProtocolParams.security_policy:
 final key length, eps_sec, eps_cor, QBER threshold, finite-key enforcement); the
@@ -54,6 +55,7 @@ MODES = ("none", "sign", "hybrid")
 NONCE_BYTES = 32
 ID_PK_BYTES = 1952  # ML-DSA-65 public key
 FINISHED_PREFIX = b"qkd-finished-v1|"
+RESUME_SUFFIX = b"|resume"  # appended to the signed bytes when the finished carries "resume": 1
 CONFIRM_PREFIX = b"qkd-confirm-v1|"
 CONFIRM_TAG_BYTES = 32
 
@@ -235,9 +237,13 @@ def confirmation_tag(key: bytes, role: bytes, transcript_hash: bytes) -> bytes:
     return hmac.new(key_schedule(key).confirm, CONFIRM_PREFIX + role + b"|" + transcript_hash, hashlib.sha256).digest()
 
 
-def finished_message(role: bytes, transcript_hash: bytes, tag: bytes) -> bytes:
-    """The bytes a finished signature covers: FINISHED_PREFIX + role + "|" + T + tag."""
-    return FINISHED_PREFIX + role + b"|" + transcript_hash + tag
+def finished_message(role: bytes, transcript_hash: bytes, tag: bytes, resume: bool = False) -> bytes:
+    """
+    The bytes a finished signature covers: FINISHED_PREFIX + role + "|" + T + tag, plus
+    RESUME_SUFFIX when the message carries the resume flag. T and the tag have fixed lengths,
+    so the suffix cannot be confused with them.
+    """
+    return FINISHED_PREFIX + role + b"|" + transcript_hash + tag + (RESUME_SUFFIX if resume else b"")
 
 
 def session_key(qkd_key: bytes, state: HandshakeState, transcript_hash: bytes) -> bytes:
@@ -293,7 +299,7 @@ def _kem(op: Callable[[], Any]) -> Any:
 
 def _finished(seed: bytes, role: bytes, transcript_hash: bytes, key: bytes, resume: bool = False) -> dict:
     tag = confirmation_tag(key, role, transcript_hash)
-    signature = pqc.sign(seed, finished_message(role, transcript_hash, tag))
+    signature = pqc.sign(seed, finished_message(role, transcript_hash, tag, resume))
     msg: dict[str, Any] = {"finished": _b64(signature), "confirm": _b64(tag)}
     if resume:
         msg["resume"] = 1
@@ -301,7 +307,7 @@ def _finished(seed: bytes, role: bytes, transcript_hash: bytes, key: bytes, resu
 
 
 def _resume_flag(msg: Any) -> bool:
-    """Whether a (verified) finished message offered resume. Anything but the integer 1 counts as no."""
+    """Whether a finished message offers resume. Anything but the integer 1 counts as no."""
     return isinstance(msg, dict) and msg.get("resume") == 1 and not isinstance(msg.get("resume"), bool)
 
 
@@ -313,7 +319,8 @@ def _verify_finished(msg: Any, peer_pk: bytes, role: bytes, transcript_hash: byt
     tag = _b64_field(msg, "confirm", "finished")
     if len(tag) != CONFIRM_TAG_BYTES:
         raise PeerAuthError(f"malformed finished: confirm must be {CONFIRM_TAG_BYTES} bytes")
-    if not pqc.verify(peer_pk, finished_message(role, transcript_hash, tag), signature):
+    # The flag as received decides which bytes must have been signed, so a stripped or added flag fails here
+    if not pqc.verify(peer_pk, finished_message(role, transcript_hash, tag, _resume_flag(msg)), signature):
         raise PeerAuthError(f"{role.decode()} finished signature invalid")
     if not hmac.compare_digest(tag, confirmation_tag(key, role, transcript_hash)):
         raise KeyConfirmationError(

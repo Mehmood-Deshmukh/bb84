@@ -463,3 +463,43 @@ def test_mallory_relaying_the_hellos_is_still_caught_at_key_confirmation(keys, p
     assert isinstance(alice, PeerAuthError) and "signature" in alice.reason
     assert alice_rep.stages[-1] == "key_confirmation", "Alice never reached the resume negotiation or any file data"
     assert not mitm.relayed and not out.exists()
+
+
+# ── the resume flag is signed ───────────────────────────────────
+
+
+def _strip_flag(msg: dict) -> dict:
+    return {k: v for k, v in msg.items() if k != "resume"}
+
+
+def _add_flag(msg: dict) -> dict:
+    return {**msg, "resume": 1}
+
+
+@pytest.mark.parametrize("step", ["4b-bob", "4b-alice"])
+def test_stripping_the_resume_flag_fails_the_finished_signature(step: str, keys, parallel, src: Path, out: Path) -> None:
+    interrupt_after(keys, parallel, src, out, 6)
+    run = transfer(keys, parallel, src, out, tamper_step=step, tamper=_strip_flag)
+    victim = run.alice if step == "4b-bob" else run.bob
+    assert isinstance(victim, PeerAuthError), victim
+    assert isinstance(run.alice, Exception) and isinstance(run.bob, Exception), "no side may report success"
+    assert not final_file(out).exists()
+    assert ResumeStore(str(out), TID).load().next_chunk == 6, "the interrupted state must survive"
+
+
+@pytest.mark.parametrize("step, alice_on, bob_on", [("4b-bob", True, False), ("4b-alice", False, True)])
+def test_adding_the_resume_flag_fails_the_finished_signature(step: str, alice_on: bool, bob_on: bool,
+                                                             keys, parallel, src: Path, out: Path) -> None:
+    run = transfer(keys, parallel, src, out, alice_resume=OPTS if alice_on else None,
+                   bob_resume=OPTS if bob_on else None, chunks=None, tamper_step=step, tamper=_add_flag)
+    victim = run.alice if step == "4b-bob" else run.bob
+    assert isinstance(victim, PeerAuthError), victim
+    assert not final_file(out).exists()
+
+
+def test_the_plain_finished_signature_is_unchanged_without_the_flag() -> None:
+    from qkd.usecases.handshake import FINISHED_PREFIX, RESUME_SUFFIX, finished_message
+
+    t, tag = b"\x01" * 32, b"\x02" * 32
+    assert finished_message(b"bob", t, tag) == FINISHED_PREFIX + b"bob|" + t + tag
+    assert finished_message(b"bob", t, tag, True) == finished_message(b"bob", t, tag) + RESUME_SUFFIX

@@ -164,8 +164,8 @@ The final file `received_<name>` appears only by an atomic rename after the whol
 
 **Limits.**
 
-- Each side says it supports resume with an unsigned `"resume": 1` in its `finished` message. A network
-  attacker can strip it (the transfer then runs without resume, or Bob stops with his data intact) or stall the
+- Each side says it supports resume with `"resume": 1` in its `finished` message. The flag is covered by the
+  finished signature, so stripping or adding it in transit fails step 4b. A network attacker can still stall the
   negotiation until its 30 second timeout. That is the same power as dropping the connection.
 - Only transfers that got past key confirmation can be resumed; before that nothing was verified.
 - The sender hashes the whole file once before sending, and the receiver once after receiving.
@@ -236,7 +236,7 @@ evaluated separately by QBER, and `finished` contains the signature over `T` its
 | 5+ | A to B | No | one message per chunk: GCM tag (16 bytes) + ciphertext. With resume, chunks `resume_offset` to the end |
 | 6 | B to A | No | `{"resume_done": b64}` (resume only): sealed receipt, sent after the size and whole-file SHA-256 verified |
 
-With resume on, each `finished` also carries `"resume": 1` (not covered by the signature). Steps 4c, 4d and 6
+With resume on, each `finished` also carries `"resume": 1` (covered by the signature: the signed bytes then end in `|resume`). Steps 4c, 4d and 6
 happen only if both sides sent it; otherwise the transfer runs exactly as without resume.
 
 Bob sends `finished` first at step 4b. Alice verifies Bob's signature before deriving the session key or sending
@@ -295,8 +295,8 @@ What it does not stop (limits):
   certificate hierarchy, or revocation infrastructure.
 - **Noiseless simulation and no reconciliation**: The quantum channel simulation is noiseless, so any non-zero
   QBER aborts the transfer; real-world information reconciliation is not implemented.
-- **Resume negotiation can be stalled or disabled** by an in-path attacker who strips the unsigned `resume` flag
-  (see [Resumable transfers](#resumable-transfers)). It cannot cause key or nonce reuse or reveal data.
+- **Resume negotiation can be stalled** by an in-path attacker until its timeout; stripping the signed `resume`
+  flag aborts the session at key confirmation (see [Resumable transfers](#resumable-transfers)). It cannot cause key or nonce reuse or reveal data.
 - **Unauthenticated REST API**: The `qkd-node` REST API and mDNS discovery are unauthenticated and run over plain HTTP.
 
 ## REST API

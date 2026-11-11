@@ -14,10 +14,10 @@ and bound to the transcript digest T, so they can neither be read, altered, nor 
 another session. A message that fails authentication is a PeerAuthError: the transfer aborts
 before any file data moves.
 
-The two sides enter 4c/4d only if each offered resume in its `finished` message. That flag is
-not signed, so a network attacker can strip it (the sides then fall back to a plain transfer,
-or Bob, who had asked, stops with his interrupted state untouched) or stall the exchange until
-the negotiation timeout; neither reveals data or reuses a key.
+The two sides enter 4c/4d only if each offered resume in its `finished` message. The flag is
+covered by the finished signature, so a network attacker who strips or adds it fails step 4b
+(PeerAuthError) and cannot make one side negotiate while the other does not. An attacker can
+still stall the exchange until the negotiation timeout; that reveals no data and reuses no key.
 
 Bob asks to continue after the chunks he holds (`next_chunk`), with a hash of those bytes.
 Alice decides the offset: `next_chunk` if her file still starts with those bytes, else 0 and a
@@ -240,6 +240,8 @@ def _recv(channel: TranscriptChannel, missing: str) -> Any:
         return channel.recv_untracked()
     except TimeoutError:
         raise ResumeError(f"timed out: {missing}", resumable=True) from None
+    except ValueError:  # not JSON (for example raw metadata bytes): the peer is not negotiating
+        raise ResumeError(f"{missing} (got something else)", resumable=True) from None
 
 
 def _decode_blob(msg: Any, name: str, what: str) -> bytes:
