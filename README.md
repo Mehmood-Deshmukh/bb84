@@ -389,6 +389,7 @@ once at import, and the node passes its environment on to the alice and bob proc
 | `QKD_KNOWN_PEERS_FILE` | known_peers.json | path to pinned peer public keys |
 | `QKD_TOFU` | 1 | trust-on-first-use for unknown peers (1 = enabled, 0 = disabled) |
 | `QKD_RESUME` | 0 | make transfers resumable: the node passes `--resume` to its runners, `qkd-alice`/`qkd-bob` default to it. Needs `sign` or `hybrid` |
+| `QKD_RESUME_STALL_TIMEOUT` | 60 | seconds of silence a resumable transfer accepts in the file phase (metadata, chunks, receipt) before it reports `interrupted`; this is what notices a network that drops without closing the connection. Raise it for very large files, since each side hashes the whole file once inside this window |
 | `QKD_RESUME_SYNC_CHUNKS` | 8 | verified chunks between an fsync of the `.part` and a sidecar update; a hard kill re-sends at most this many minus one |
 | `QKD_STATE_FILE` | node_state.json | where the node keeps interrupted transfers (and, beside it, the sender's uploads) |
 

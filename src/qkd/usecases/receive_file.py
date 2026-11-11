@@ -242,6 +242,9 @@ def _receive_resumable(
     held = 0  # bytes of verified data on disk, for the interruption report
     try:
         negotiation = bob_negotiate(channel, key, transcript_hash, handshake, resume, output_dir, reporter)
+        # A sender that goes silent (a network that died without closing the connection) must not
+        # block forever: the timeout is an OSError, handled below like a lost connection.
+        sock.settimeout(resume.stall_timeout)
 
         reporter.stage("file_transfer")
         reporter.section("Phase 5: Secure File Reception (Chunked Streaming)")

@@ -145,6 +145,11 @@ TOFU = _env("TOFU", 1, _cast_tofu)
 # ─────────────────────────────────────────────
 RESUME = _env("RESUME", 0, _cast_tofu)  # 1 = runners launched by the node negotiate resume; CLI flag --resume
 RESUME_SYNC_CHUNKS = _env("RESUME_SYNC_CHUNKS", 8, int)  # verified chunks between fsync + sidecar updates
+# Longest silence, in seconds, a resumable transfer accepts between two messages of the file phase
+# (metadata, chunks, receipt) before it reports `interrupted`. A network that drops without closing
+# the connection is only noticed this way. Each side hashes the whole file once inside this window
+# (Alice before the metadata, Bob before the receipt), so raise it for very large files or slow disks.
+RESUME_STALL_TIMEOUT = _env("RESUME_STALL_TIMEOUT", 60.0, float)
 STATE_FILE = _env("STATE_FILE", "node_state.json", str)  # interrupted transfers kept by the backend node
 
 

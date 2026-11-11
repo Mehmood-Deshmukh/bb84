@@ -503,3 +503,82 @@ def test_the_plain_finished_signature_is_unchanged_without_the_flag() -> None:
     t, tag = b"\x01" * 32, b"\x02" * 32
     assert finished_message(b"bob", t, tag) == FINISHED_PREFIX + b"bob|" + t + tag
     assert finished_message(b"bob", t, tag, True) == finished_message(b"bob", t, tag) + RESUME_SUFFIX
+
+
+# ── a peer that goes silent without closing the connection ──────
+
+
+def _stalling_run(keys, parallel, src: Path, out: Path, relay_chunks: int, forward_receipt: bool = False) -> Run:
+    """Like transfer(), but after relay_chunks chunks the proxy stops forwarding and keeps both connections open."""
+    import threading
+
+    from qkd.services import wire
+
+    opts = ResumeOptions(TID, stall_timeout=0.5)
+    done = threading.Event()
+    alice_rep, bob_rep = Reporter(), Reporter()
+    alice_end, proxy_a = socket.socketpair()
+    proxy_b, bob_end = socket.socketpair()
+
+    def silent_proxy() -> None:
+        try:
+            for _, direction in WIRE_STEPS_RESUME:
+                src_sock, dst_sock = (proxy_a, proxy_b) if direction == "A2B" else (proxy_b, proxy_a)
+                wire.forward_message(src_sock, dst_sock)
+            for _ in range(relay_chunks):
+                wire.forward_message(proxy_a, proxy_b)
+            if forward_receipt:
+                wire.forward_message(proxy_b, proxy_a)
+        except (ConnectionError, OSError):
+            pass
+        done.wait(20)  # hold both connections open and silent: no FIN, no RST
+
+    def side(fn):
+        def run():
+            try:
+                return fn()
+            except Exception as exc:  # noqa: BLE001 - asserted on by the caller
+                return exc
+        return run
+
+    def both() -> tuple[Any, Any]:
+        try:
+            a, b = parallel(
+                side(lambda: send_file(alice_end, str(src), alice_rep, PARAMS, context(keys, "alice", "hybrid"), opts)),
+                side(lambda: receive_file(bob_end, str(out), bob_rep, PARAMS, context(keys, "bob", "hybrid"), opts)),
+            )
+            return a, b
+        finally:
+            done.set()
+
+    with alice_end, proxy_a, proxy_b, bob_end:
+        (alice, bob), _ = parallel(both, silent_proxy)
+    assert alice is not None and bob is not None, "a side hung: the stall timeout did not fire"
+    return Run(alice, bob, alice_rep, bob_rep)
+
+
+def test_a_silent_network_mid_stream_interrupts_both_sides_and_can_be_resumed(keys, parallel, src: Path, out: Path) -> None:
+    run = _stalling_run(keys, parallel, src, out, relay_chunks=5)
+    assert isinstance(run.bob, TransferInterrupted), run.bob
+    assert isinstance(run.alice, TransferInterrupted), run.alice
+    assert run.bob.bytes_verified == 5 * CHUNK
+    assert not final_file(out).exists()
+    assert ResumeStore(str(out), TID).load().next_chunk == 5
+
+    run = transfer(keys, parallel, src, out, chunks=CHUNKS - 5)
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert final_file(out).read_bytes() == src.read_bytes()
+
+
+def test_a_swallowed_receipt_interrupts_the_sender_instead_of_hanging(keys, parallel, src: Path, out: Path) -> None:
+    run = _stalling_run(keys, parallel, src, out, relay_chunks=CHUNKS)
+    assert not isinstance(run.bob, Exception), run.bob
+    assert final_file(out).read_bytes() == src.read_bytes()
+    assert isinstance(run.alice, TransferInterrupted), run.alice
+    assert "silent" in run.alice.reason
+
+
+def test_the_stall_timeout_does_not_disturb_an_honest_transfer(keys, parallel, src: Path, out: Path) -> None:
+    run = _stalling_run(keys, parallel, src, out, relay_chunks=CHUNKS, forward_receipt=True)
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert final_file(out).read_bytes() == src.read_bytes()

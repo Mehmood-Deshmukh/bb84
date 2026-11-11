@@ -40,7 +40,7 @@ from typing import Any, Iterator, Optional
 from cryptography.exceptions import InvalidTag
 
 from qkd.core import pqc
-from qkd.core.config import RESUME_SYNC_CHUNKS
+from qkd.core.config import RESUME_STALL_TIMEOUT, RESUME_SYNC_CHUNKS
 from qkd.core.crypto_utils import open_resume_message, seal_resume_message
 from qkd.services.file_stream import file_sha256
 from qkd.services.reporting import Reporter
@@ -72,6 +72,7 @@ class ResumeOptions:
     transfer_id: str
     sync_chunks: int = RESUME_SYNC_CHUNKS
     timeout: float = NEGOTIATION_TIMEOUT
+    stall_timeout: float = RESUME_STALL_TIMEOUT  # longest silence in the file phase before `interrupted`
 
     def __post_init__(self) -> None:
         if not TRANSFER_ID.match(self.transfer_id or ""):
@@ -215,7 +216,8 @@ def bob_send_receipt(channel: TranscriptChannel, key: bytes, transcript_hash: by
 
 def alice_await_receipt(channel: TranscriptChannel, key: bytes, transcript_hash: bytes, sha256: str, size: int) -> None:
     """
-    Step 6 for Alice: wait for Bob's receipt. ConnectionError (Bob never confirmed) propagates;
+    Step 6 for Alice: wait for Bob's receipt. ConnectionError and TimeoutError (Bob never confirmed;
+    the caller set the stall timeout on the socket) propagate;
     PeerAuthError if the receipt fails authentication; ResumeError if it names another file.
     """
     msg = channel.recv_untracked()
