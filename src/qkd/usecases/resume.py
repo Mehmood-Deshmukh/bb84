@@ -46,6 +46,7 @@ from qkd.services.file_stream import file_sha256
 from qkd.services.reporting import Reporter
 from qkd.services.resume import (
     TRANSFER_ID,
+    DeliveredRecord,
     ResumeError,
     ResumeState,
     ResumeStore,
@@ -85,6 +86,7 @@ class BobNegotiation:
     previous: Optional[ResumeState]  # what Bob had on disk before this session
     offset: int  # first chunk index Alice will send
     reason: Optional[str]  # set when Alice restarted from 0 although Bob asked for more
+    delivered: Optional[DeliveredRecord] = None  # set when Bob already has the whole file in place
 
 
 def wants_resume(resume: Optional[ResumeOptions], auth: Optional[AuthContext], reporter: Reporter) -> bool:
@@ -115,8 +117,17 @@ def bob_negotiate(
     reporter.info("Negotiating resume...")
     store = ResumeStore(output_dir, resume.transfer_id)
     previous = store.load()
+    delivered = store.load_delivered() if previous is None else None
     next_chunk, prefix = 0, None
-    if previous is not None:
+    if delivered is not None:
+        # The file is complete and in place; the sender most likely never got the receipt.
+        if delivered.peer_fingerprint != handshake.peer_fingerprint:
+            raise PeerAuthError(
+                "resume refused: the authenticated peer's identity differs from the one that sent this transfer"
+            )
+        next_chunk, prefix = delivered.num_chunks, delivered.sha256
+        reporter.info(f"This transfer was already delivered ({delivered.total_size} bytes): asking only to confirm it")
+    elif previous is not None:
         if previous.peer_fingerprint != handshake.peer_fingerprint:
             raise PeerAuthError(
                 "resume refused: the authenticated peer's identity differs from the one that started this transfer"
@@ -125,12 +136,13 @@ def bob_negotiate(
         prefix = store.prefix_sha256(previous.next_byte)
         reporter.info(f"Holding {previous.next_byte} verified bytes ({next_chunk} chunks) of an interrupted transfer")
 
+    known = delivered or previous
     request = {
         "v": REQUEST_VERSION,
         "transfer_id": resume.transfer_id,
         "next_chunk": next_chunk,
-        "chunk_size": previous.chunk_size if previous else None,
-        "meta_digest": previous.meta_digest if previous else None,
+        "chunk_size": known.chunk_size if known else None,
+        "meta_digest": known.meta_digest if known else None,
         "prefix_sha256": prefix,
         "alice_fp": handshake.peer_fingerprint,
     }
@@ -151,7 +163,8 @@ def bob_negotiate(
         reporter.metrics(resume_restart_reason=reason or "restarted")
     elif offset > 0:
         reporter.success(f"Resuming at chunk {offset}")
-    return BobNegotiation(store, previous, offset, reason if offset == 0 and next_chunk > 0 else None)
+    return BobNegotiation(store, previous, offset, reason if offset == 0 and next_chunk > 0 else None,
+                          delivered if offset > 0 else None)
 
 
 def alice_negotiate(

@@ -123,8 +123,9 @@ def final_file(out: Path) -> Path:
 
 
 def state_files(out: Path) -> list[str]:
+    """The partial state (.part, sidecar). The delivery record of a finished transfer is not partial state."""
     d = out / ".resume"
-    return sorted(os.listdir(d)) if d.exists() else []
+    return sorted(f for f in os.listdir(d) if not f.endswith(".done.json")) if d.exists() else []
 
 
 def flip(name: str):
@@ -582,3 +583,55 @@ def test_the_stall_timeout_does_not_disturb_an_honest_transfer(keys, parallel, s
     run = _stalling_run(keys, parallel, src, out, relay_chunks=CHUNKS, forward_receipt=True)
     assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
     assert final_file(out).read_bytes() == src.read_bytes()
+
+
+# ── the receiver finished but the sender never got the receipt ──
+
+
+def _delivered_without_receipt(keys, parallel, src: Path, out: Path) -> None:
+    run = _stalling_run(keys, parallel, src, out, relay_chunks=CHUNKS)
+    assert not isinstance(run.bob, Exception) and isinstance(run.alice, TransferInterrupted), (run.alice, run.bob)
+    assert final_file(out).read_bytes() == src.read_bytes() and state_files(out) == []
+    assert (out / ".resume" / f"{TID}.done.json").exists()
+
+
+def test_a_resume_after_a_lost_receipt_sends_only_the_receipt(keys, parallel, src: Path, out: Path) -> None:
+    _delivered_without_receipt(keys, parallel, src, out)
+    before = final_file(out).stat().st_mtime_ns
+
+    run = transfer(keys, parallel, src, out, chunks=0)  # the proxy relays no chunk at all, then the receipt
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert run.alice_rep.merged()["resumed_from_bytes"] == SIZE == run.bob_rep.merged()["resumed_from_bytes"]
+    assert final_file(out).read_bytes() == src.read_bytes()
+    assert final_file(out).stat().st_mtime_ns == before, "the delivered file was not rewritten"
+
+
+def test_a_delivered_file_that_is_gone_is_sent_again(keys, parallel, src: Path, out: Path) -> None:
+    _delivered_without_receipt(keys, parallel, src, out)
+    final_file(out).unlink()
+
+    run = transfer(keys, parallel, src, out, chunks=CHUNKS)
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert final_file(out).read_bytes() == src.read_bytes()
+
+
+def test_a_changed_source_after_delivery_is_sent_from_the_start(keys, parallel, src: Path, out: Path) -> None:
+    _delivered_without_receipt(keys, parallel, src, out)
+    src.write_bytes(os.urandom(SIZE))  # same name and size, other bytes
+
+    run = transfer(keys, parallel, src, out, chunks=CHUNKS)
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert run.alice_rep.merged()["resume_restart_reason"] == "source_changed"
+    assert final_file(out).read_bytes() == src.read_bytes()
+
+
+def test_a_different_sender_gets_no_receipt_for_a_delivered_file(keys, parallel, src: Path, out: Path) -> None:
+    _delivered_without_receipt(keys, parallel, src, out)
+    stranger = pqc.sig_keygen()
+    bob_ctx = AuthContext("hybrid", *keys["bob"], AcceptAnyVerifier())
+    alice_ctx = AuthContext("hybrid", stranger[0], stranger[1], context(keys, "alice", "hybrid").verifier)
+
+    run = transfer(keys, parallel, src, out, alice_ctx=alice_ctx, bob_ctx=bob_ctx, chunks=0)
+    assert isinstance(run.bob, PeerAuthError) and "identity differs" in run.bob.reason
+    assert isinstance(run.alice, Exception), "the stranger must not be told the file was delivered"
+    assert (out / ".resume" / f"{TID}.done.json").exists()

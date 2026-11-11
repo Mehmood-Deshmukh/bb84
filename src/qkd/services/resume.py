@@ -5,6 +5,9 @@ Bob keeps, per transfer id, under <output_dir>/.resume/:
 
     <id>.part   bytes that passed AES-GCM, in order, and nothing else
     <id>.json   sidecar: what the .part is a prefix of, and how far it goes
+    <id>.done.json   written once the file is complete and in place: what was delivered, and to whom.
+                     If the sender never got the receipt and resumes, Bob answers from this record
+                     (he holds every chunk) and only the receipt is sent again, not the file.
 
 The state is keyed by transfer id (not file name) because Bob has to find it before the
 metadata message arrives. The final file `received_<name>` is created only by an atomic
@@ -128,8 +131,45 @@ def _valid_state(raw: object, transfer_id: str) -> Optional[ResumeState]:
     return state
 
 
+@dataclass
+class DeliveredRecord:
+    """What a finished transfer delivered. Kept after the .part and sidecar are gone."""
+
+    transfer_id: str
+    filename: str
+    total_size: int
+    chunk_size: int
+    num_chunks: int
+    meta_digest: str
+    sha256: str
+    peer_fingerprint: Optional[str]
+    version: int = SIDECAR_VERSION
+
+
+def _valid_delivered(raw: object, transfer_id: str) -> Optional[DeliveredRecord]:
+    if not isinstance(raw, dict) or raw.get("version") != SIDECAR_VERSION or raw.get("transfer_id") != transfer_id:
+        return None
+    try:
+        rec = DeliveredRecord(**raw)
+    except TypeError:
+        return None
+    ints = (rec.total_size, rec.chunk_size, rec.num_chunks)
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in ints):
+        return None
+    if not (isinstance(rec.filename, str) and isinstance(rec.meta_digest, str)
+            and isinstance(rec.sha256, str) and _SHA256_HEX.match(rec.sha256)):
+        return None
+    if rec.peer_fingerprint is not None and not isinstance(rec.peer_fingerprint, str):
+        return None
+    if rec.chunk_size <= 0 or rec.total_size < 0 or rec.num_chunks != expected_chunks(rec.total_size, rec.chunk_size):
+        return None
+    if rec.meta_digest != meta_digest(rec.filename, rec.total_size):
+        return None
+    return rec
+
+
 class ResumeStore:
-    """The .part and sidecar of one transfer."""
+    """The .part and sidecar of one transfer, and the record of its delivery."""
 
     def __init__(self, output_dir: str, transfer_id: str) -> None:
         if not TRANSFER_ID.match(transfer_id or ""):
@@ -139,6 +179,7 @@ class ResumeStore:
         self.dir = os.path.join(output_dir, STATE_DIRNAME)
         self.part_path = os.path.join(self.dir, f"{transfer_id}.part")
         self.state_path = os.path.join(self.dir, f"{transfer_id}.json")
+        self.delivered_path = os.path.join(self.dir, f"{transfer_id}.done.json")
 
     # ── sidecar ────────────────────────────────────────────────
 
@@ -152,22 +193,56 @@ class ResumeStore:
 
     def save(self, state: ResumeState) -> None:
         """Write the sidecar atomically: temp file, fsync, rename."""
+        self._write_json(self.state_path, asdict(state))
+
+    def _write_json(self, path: str, data: dict) -> None:
         os.makedirs(self.dir, exist_ok=True)
-        tmp = self.state_path + ".tmp"
+        tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(asdict(state), f)
+            json.dump(data, f)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, self.state_path)
+        os.replace(tmp, path)
         _fsync_dir(self.dir)
 
+    def discard_partial(self) -> None:
+        """Delete the .part and the sidecar; a delivery record stays."""
+        _remove(self.part_path, self.state_path, self.state_path + ".tmp")
+
     def discard(self) -> None:
-        """Delete the .part and the sidecar."""
-        for path in (self.part_path, self.state_path, self.state_path + ".tmp"):
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                pass
+        """Delete everything kept for this transfer: the .part, the sidecar and the delivery record."""
+        self.discard_partial()
+        _remove(self.delivered_path, self.delivered_path + ".tmp")
+
+    # ── delivery record ────────────────────────────────────────
+
+    def save_delivered(self, meta: FileMeta, peer_fingerprint: Optional[str]) -> None:
+        """Record that this file is complete and in place (called after the rename)."""
+        self._write_json(self.delivered_path, asdict(DeliveredRecord(
+            transfer_id=self.transfer_id, filename=meta.filename, total_size=meta.total_size,
+            chunk_size=meta.chunk_size, num_chunks=meta.num_chunks,
+            meta_digest=meta_digest(meta.filename, meta.total_size), sha256=meta.sha256,
+            peer_fingerprint=peer_fingerprint,
+        )))
+
+    def load_delivered(self) -> Optional[DeliveredRecord]:
+        """
+        The delivery record, or None if there is none, it is unreadable, or the delivered file is no
+        longer in place with the recorded size (then a new session sends the file again).
+        """
+        try:
+            with open(self.delivered_path, "r", encoding="utf-8") as f:
+                rec = _valid_delivered(json.load(f), self.transfer_id)
+        except (OSError, ValueError):
+            return None
+        if rec is None:
+            return None
+        try:
+            if os.path.getsize(received_path(self.output_dir, rec.filename)) != rec.total_size:
+                return None
+        except OSError:
+            return None
+        return rec
 
     # ── the .part ──────────────────────────────────────────────
 
@@ -308,8 +383,20 @@ def receive_encrypted_file_resumable(
     os.makedirs(store.output_dir, exist_ok=True)
     os.replace(store.part_path, received_path(store.output_dir, meta.filename))
     _fsync_dir(store.output_dir)
-    store.discard()
+    try:  # lets a sender that missed the receipt get it again without re-sending the file
+        store.save_delivered(meta, state.peer_fingerprint)
+    except OSError:
+        pass
+    store.discard_partial()
     return meta.total_size
+
+
+def _remove(*paths: str) -> None:
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
 
 def _truncate(path: str, size: int) -> None:

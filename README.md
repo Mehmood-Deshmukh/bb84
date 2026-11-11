@@ -139,6 +139,11 @@ interruption she sends it from the start and says why (`source_changed`, `file_c
 When the last chunk is verified Bob checks the size and the SHA-256 of the whole file, renames the file into
 place, and sends Alice a sealed receipt. Alice only reports success after reading it. See the wire table below.
 
+If the receipt is lost (the connection drops after Bob finished), Alice ends `interrupted` while Bob has the
+file. Bob keeps a small delivery record, `received/.resume/<id>.done.json`. When Alice resumes, a new session
+runs, Bob says he holds every chunk, Alice checks that her file still matches and sends no file data, and Bob
+sends the receipt again. If the received file was deleted or the source changed, the file is sent again.
+
 **What is stored where.**
 
 | Where | What |
