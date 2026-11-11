@@ -128,7 +128,7 @@ def test_sigkill_the_sender_mid_transfer_then_resume(tmp_path: Path) -> None:
 
     assert bob2.result()["outcome"] == "completed" and alice2.result()["outcome"] == "completed"
     assert (out / "received_big.bin").read_bytes() == src.read_bytes()
-    assert not state.exists() or os.listdir(state) == [], "the partial state is gone once the file is complete"
+    assert os.listdir(state) == [f"{TID}.done.json"], "the partial state is gone; only the delivery record stays"
 
     resumed = bob2.metrics()["resumed_from_bytes"]
     assert resumed == verified and alice2.metrics()["resumed_from_bytes"] == resumed

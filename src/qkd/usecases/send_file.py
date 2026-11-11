@@ -214,6 +214,11 @@ def send_file(
     except (ConnectionError, OSError) as exc:
         raise TransferInterrupted(f"connection lost during resume negotiation: {exc}") from exc
 
+    if negotiate:
+        # From here a silent peer (a network that died without closing the connection) must not
+        # block forever: a stalled send or a missing receipt becomes TransferInterrupted below.
+        sock.settimeout(resume.stall_timeout)
+
     # Everything that went through the transcript channel: hellos, qubits, BB84, finished
     reporter.metrics(channel_bytes=channel.bytes_sent + channel.bytes_received)
     reporter.stage("file_transfer")
@@ -239,7 +244,8 @@ def send_file(
             alice_await_receipt(channel, key, transcript_hash, meta.sha256, meta.total_size)
     except (ConnectionError, OSError) as exc:
         if negotiate:
-            raise TransferInterrupted(f"connection lost before the receiver confirmed the file: {exc}") from exc
+            what = "the receiver went silent" if isinstance(exc, TimeoutError) else "connection lost"
+            raise TransferInterrupted(f"{what} before the receiver confirmed the file: {exc}") from exc
         raise
     reporter.success(f"Encrypted file '{meta.filename}' streamed to Bob ({meta.num_chunks} chunks)")
 

@@ -242,6 +242,9 @@ def _receive_resumable(
     held = 0  # bytes of verified data on disk, for the interruption report
     try:
         negotiation = bob_negotiate(channel, key, transcript_hash, handshake, resume, output_dir, reporter)
+        # A sender that goes silent (a network that died without closing the connection) must not
+        # block forever: the timeout is an OSError, handled below like a lost connection.
+        sock.settimeout(resume.stall_timeout)
 
         reporter.stage("file_transfer")
         reporter.section("Phase 5: Secure File Reception (Chunked Streaming)")
@@ -251,6 +254,12 @@ def _receive_resumable(
         if meta.resume_offset != negotiation.offset:
             raise ResumeError("the file metadata does not carry the granted resume offset")
         reporter.info(f"File: {meta.filename} ({meta.total_size} bytes, {meta.num_chunks} chunks of {meta.chunk_size // 1024} KB)")
+
+        if negotiation.delivered is not None:
+            return _confirm_delivered(channel, key, transcript_hash, kx, output_dir, reporter, meta, negotiation)
+        # A new copy replaces whatever an earlier delivery of this transfer id recorded
+        if negotiation.previous is None:
+            negotiation.store.discard()
 
         state = negotiation.store.begin(meta, negotiation.offset, handshake.peer_fingerprint, handshake.mode,
                                         negotiation.previous)
@@ -281,10 +290,7 @@ def _receive_resumable(
         raise
 
     output_path = received_path(output_dir, meta.filename)
-    try:
-        bob_send_receipt(channel, key, transcript_hash, meta.sha256, meta.total_size)
-    except OSError:  # the file is complete and in place; the sender will just have to ask again
-        reporter.warning("Could not send the receipt: the sender is gone")
+    _send_receipt(channel, key, transcript_hash, meta, reporter)
     reporter.success(f"File decrypted, verified and saved as '{output_path}' ({written} bytes)")
     reporter.success("All chunk authentication tags and the SHA-256 of the whole file verified!")
 
@@ -292,3 +298,41 @@ def _receive_resumable(
     reporter.success("File securely received via BB84 QKD + AES-256-GCM")
     report_summary(kx, meta.num_chunks, meta.chunk_size, reporter)
     return ReceiveResult(kx, output_path, written, chunk_boundary(negotiation.offset, meta.chunk_size, meta.total_size))
+
+
+def _send_receipt(channel: TranscriptChannel, key: bytes, transcript_hash: bytes, meta, reporter: Reporter) -> None:
+    try:
+        bob_send_receipt(channel, key, transcript_hash, meta.sha256, meta.total_size)
+    except OSError:  # the file is complete and in place; a resume by the sender gets the receipt again
+        reporter.warning("Could not send the receipt: the sender is gone. It can resume to get it again.")
+
+
+def _confirm_delivered(
+    channel: TranscriptChannel,
+    key: bytes,
+    transcript_hash: bytes,
+    kx: KeyExchangeResult,
+    output_dir: str,
+    reporter: Reporter,
+    meta,
+    negotiation: BobNegotiation,
+) -> ReceiveResult:
+    """
+    The file of this transfer is already complete and in place (the sender missed the receipt and
+    resumed). Alice has checked that her file still hashes to what Bob holds and sends no chunks;
+    Bob checks that the metadata names that same file and sends the receipt again.
+    """
+    rec = negotiation.delivered
+    same = (meta.resume_offset == meta.num_chunks == rec.num_chunks and meta.filename == rec.filename
+            and meta.total_size == rec.total_size and meta.chunk_size == rec.chunk_size and meta.sha256 == rec.sha256)
+    if not same:
+        raise ResumeError("the metadata does not describe the file that was already delivered")
+    reporter.metrics(resumed_from_bytes=meta.total_size, bytes_total=meta.total_size)
+    reporter.progress(meta.num_chunks, meta.num_chunks, meta.total_size, meta.total_size)
+    output_path = received_path(output_dir, meta.filename)
+    _send_receipt(channel, key, transcript_hash, meta, reporter)
+    reporter.success(f"'{output_path}' was already received and verified ({meta.total_size} bytes): confirmed to the sender")
+
+    reporter.section("Transfer Complete")
+    report_summary(kx, meta.num_chunks, meta.chunk_size, reporter)
+    return ReceiveResult(kx, output_path, meta.total_size, meta.total_size)

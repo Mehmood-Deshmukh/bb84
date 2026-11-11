@@ -353,13 +353,24 @@ class NodeService:
         if (existing.direction is not Direction.incoming or not self._same_sender(existing, request)
                 or existing.filename != os.path.basename(request.filename) or existing.file_size != request.file_size):
             raise InvalidRequest("The resume offer does not match the interrupted transfer")
-        if existing.status is not S.interrupted:
+        if existing.status is S.completed and self._delivered(request.id):
+            # We have the file, but the sender never got the receipt. Run the transfer again: the
+            # receiver runner finds its delivery record and only the receipt is sent, not the file.
+            self.bus.reopen(request.id)
+        elif existing.status is not S.interrupted:
             raise TransferExists(request.id)
         transfer = self._move(request.id, S.pending)
         self._prepare_new_attempt(transfer)
         transfer.peer = request.sender  # the sender may have a new address
         self.repo.save(transfer)
         return transfer
+
+    def _delivered(self, transfer_id: str) -> bool:
+        """Whether the receiver runner left a delivery record for this transfer (and the file is still in place)."""
+        try:
+            return ResumeStore(self.output_dir, transfer_id).load_delivered() is not None
+        except ValueError:
+            return False
 
     @staticmethod
     def _same_sender(existing: Transfer, request: IncomingTransferRequest) -> bool:
@@ -620,7 +631,9 @@ class NodeService:
             shutil.rmtree(rt.upload_path.parent, ignore_errors=True)
         if self._state is not None:
             self._state.remove(transfer.id)
-            if transfer.direction is Direction.incoming:  # nothing left to resume: drop the verified bytes too
+            # Nothing left to resume: drop the verified bytes too. A completed transfer keeps its small
+            # delivery record, so a sender that missed the receipt can still resume and get it.
+            if transfer.direction is Direction.incoming and transfer.status is not S.completed:
                 try:
                     ResumeStore(self.output_dir, transfer.id).discard()
                 except (ValueError, OSError) as exc:
