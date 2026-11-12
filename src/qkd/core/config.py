@@ -135,6 +135,84 @@ def _validate_reconciliation(raw: str) -> str:
 # "none" keeps the original protocol, where any error aborts at key confirmation.
 RECONCILIATION = _env("RECONCILIATION", "none", _validate_reconciliation)
 
+
+# ─────────────────────────────────────────────
+# Photon source (core/source.py; decoy numerics in core/decoy.py)
+# ─────────────────────────────────────────────
+def _validate_source(raw: str) -> str:
+    val = raw.strip().lower()
+    if val not in {"single", "wcp", "decoy"}:
+        raise ValueError(f"Invalid source: {raw!r}. Allowed: single, wcp, decoy")
+    return val
+
+
+def _csv_floats(raw: str) -> tuple:
+    try:
+        return tuple(float(x) for x in raw.split(","))
+    except ValueError as exc:
+        raise ValueError(f"expected comma-separated numbers, got {raw!r}") from exc
+
+
+def validate_decoy_setup(intensities: tuple, probs: tuple) -> None:
+    """Check the (signal, decoy, vacuum) intensities and their probabilities are well formed."""
+    if len(intensities) != 3 or len(probs) != 3:
+        raise ValueError("decoy setup needs exactly 3 intensities and 3 probabilities (signal, decoy, vacuum)")
+    mu, nu, vac = intensities
+    if not (mu > nu > vac >= 0.0):
+        raise ValueError(f"intensities must be strictly decreasing with a non-negative vacuum, got {intensities}")
+    if vac != 0.0:
+        raise ValueError(f"the third intensity is the vacuum decoy and must be 0.0, got {vac}")
+    if any(p < 0 for p in probs) or abs(sum(probs) - 1.0) > 1e-9:
+        raise ValueError(f"probabilities must be non-negative and sum to 1, got {probs}")
+
+
+# "single" keeps the original single-photon-source behaviour (every existing run). "decoy"
+# switches Alice to a weak coherent source with three intensities and runs the decoy reveal
+# (wire step 2d) and the decoy asymptotic estimate (core/decoy.py).
+#
+# "wcp" is a weak coherent laser at the signal intensity only (no decoy or vacuum pulses),
+# still gated by the single-photon Tomamichel finite-key bound (core/finite_key.py). It is
+# DELIBERATELY INSECURE: a real laser emits multi-photon pulses, and without decoy states the
+# single-photon gate cannot bound the information a photon-number-splitting (PNS) eavesdropper
+# gains from them (see core/quantum_channel.eve_pns). It exists only as the vulnerable baseline
+# the PNS experiment breaks; never use it for a key you rely on.
+SOURCE = _env("SOURCE", "single", _validate_source)
+# (signal, decoy, vacuum) mean photon numbers and the probability of sending each.
+DECOY_INTENSITIES = _env("DECOY_INTENSITIES", (0.48, 0.1, 0.0), _csv_floats)
+DECOY_PROBS = _env("DECOY_PROBS", (0.7, 0.2, 0.1), _csv_floats)
+validate_decoy_setup(DECOY_INTENSITIES, DECOY_PROBS)
+
+# Measurement backend (core/quantum_channel.py). "aer" (default) prepares and measures every
+# clicked pulse as a one-qubit Qiskit/Aer circuit, exactly as before. "analytic" computes the
+# outcomes directly in NumPy with no Qiskit: it is exact for BB84 states with no per-qubit
+# quantum attack (honest and PNS runs; PNS acts on the photon NUMBER, not the qubit state), and
+# it makes the 1e6-1e7-click decoy finite-key runs tractable, which Aer cannot do. In analytic
+# mode qubits travel the wire as compact integer codes (bit | basis<<1), not QASM strings.
+def _validate_measurement(raw: str) -> str:
+    val = raw.strip().lower()
+    if val not in {"aer", "analytic"}:
+        raise ValueError(f"Invalid measurement: {raw!r}. Allowed: aer, analytic")
+    return val
+
+
+MEASUREMENT = _env("MEASUREMENT", "aer", _validate_measurement)
+
+
+# The decoy security gate. "asymptotic" (default, unchanged) is the Ma et al. point estimate with
+# the finite-key correction terms bolted on. "composable" is the Lim et al. (2014) composable
+# finite-key bound (core/decoy_finitekey.py), which accounts for the statistical fluctuations of
+# the measured per-intensity gains/QBERs. Both peers must select the same gate (it is run-level,
+# set identically on both sides like the channel, and is not negotiated in the hello).
+def _validate_decoy_gate(raw: str) -> str:
+    val = raw.strip().lower()
+    if val not in {"asymptotic", "composable"}:
+        raise ValueError(f"Invalid decoy gate: {raw!r}. Allowed: asymptotic, composable")
+    return val
+
+
+DECOY_GATE = _env("DECOY_GATE", "asymptotic", _validate_decoy_gate)
+
+
 AUTH_MODE = _env("AUTH_MODE", "hybrid", _validate_auth_mode)
 IDENTITY_DIR = _env("IDENTITY_DIR", "identity", str)
 KNOWN_PEERS_FILE = _env("KNOWN_PEERS_FILE", "known_peers.json", str)
@@ -164,11 +242,49 @@ class ProtocolParams:
     # background clicks, Bob's side the misalignment error (see channel_model.py).
     channel: ChannelParams = CHANNEL
     reconciliation: str = RECONCILIATION
+    # Photon source: "single" (default), "wcp", or "decoy". The intensities/probs are the weak
+    # coherent source's (signal, decoy, vacuum) means and their probabilities; they are
+    # policy (both peers must agree) because Bob counts clicks per intensity label.
+    source: str = SOURCE
+    intensities: tuple = DECOY_INTENSITIES
+    probs: tuple = DECOY_PROBS
+    # Simulation/run knobs, not policy (not in the hello): the measurement backend and, for a
+    # decoy source, which finite-key gate decides the abort. Both peers must set them the same.
+    measurement: str = MEASUREMENT
+    decoy_gate: str = DECOY_GATE
+
+    @property
+    def decoy_enabled(self) -> bool:
+        """True for the full decoy protocol (three intensities, wire step 2d, decoy gate)."""
+        return self.source == "decoy"
+
+    @property
+    def weak_coherent(self) -> bool:
+        """True for any weak-coherent source (wcp or decoy): pulses carry Poisson photon numbers."""
+        return self.source in ("wcp", "decoy")
+
+    @property
+    def signal_intensity(self) -> float:
+        """The signal mean photon number mu (the only intensity a wcp laser sends)."""
+        return self.intensities[0]
+
+    def source_mix(self) -> tuple[tuple, tuple]:
+        """
+        The (intensities, probs) a weak-coherent source actually sends: all three for decoy,
+        just the signal intensity (probability 1) for wcp. Used by the sampler and by the PNS
+        eavesdropper to compute the honest per-intensity gains.
+        """
+        if self.source == "decoy":
+            return tuple(self.intensities), tuple(self.probs)
+        return (self.intensities[0],), (1.0,)
 
     def security_policy(self) -> dict:
         """
         The values both peers must agree on. Sent in the hello (so they are bound
         into the transcript) and compared on arrival; a mismatch aborts.
+
+        intensities/probs are emitted as lists, not tuples, so a side's own policy still
+        compares equal to the peer's after the JSON round trip (JSON has no tuple).
         """
         return {
             "final_key_bits": self.final_key_bits,
@@ -177,4 +293,7 @@ class ProtocolParams:
             "qber_threshold": self.qber_threshold,
             "enforce_finite_key": self.enforce_finite_key,
             "reconciliation": self.reconciliation,
+            "source": self.source,
+            "intensities": list(self.intensities),
+            "probs": list(self.probs),
         }

@@ -35,13 +35,15 @@ class EavesdropResult:
     aborted: bool
 
 
-def _forward_hellos(alice: socket.socket, bob: socket.socket, reporter: Reporter) -> bool:
-    """Forward steps 0a and 0b unchanged. Returns True when the peers run a signed mode."""
+def _forward_hellos(alice: socket.socket, bob: socket.socket, reporter: Reporter) -> tuple[bool, bool]:
+    """Forward steps 0a and 0b unchanged. Returns (signed mode?, decoy source?)."""
     reporter.section("Phase 0: Forwarding Authentication Hellos (Unchanged)")
-    mode = json.loads(forward_message(alice, bob))["hello"]["mode"]   # 0a
+    hello = json.loads(forward_message(alice, bob))["hello"]          # 0a
     forward_message(bob, alice)                                       # 0b
-    reporter.info(f"Hellos forwarded (mode: {mode})")
-    return mode != "none"
+    mode = hello["mode"]
+    decoy = hello.get("params", {}).get("source") == "decoy"
+    reporter.info(f"Hellos forwarded (mode: {mode}, source: {'decoy' if decoy else 'single'})")
+    return mode != "none", decoy
 
 
 def _intercept_qubits(alice: socket.socket, bob: socket.socket, reporter: Reporter, fraction: float) -> list[Optional[str]]:
@@ -73,7 +75,8 @@ def _intercept_qubits(alice: socket.socket, bob: socket.socket, reporter: Report
     return eve_bases
 
 
-def _forward_sifting(alice: socket.socket, bob: socket.socket, reporter: Reporter) -> tuple[list[str], list[int]]:
+def _forward_sifting(alice: socket.socket, bob: socket.socket, reporter: Reporter,
+                     decoy: bool = False) -> tuple[list[str], list[int]]:
     reporter.section("Phase 2: Forwarding Classical Channel (Transparent)")
     reporter.info("Forwarding Bob's bases to Alice...")
     bob_bases = json.loads(forward_message(bob, alice))
@@ -82,6 +85,12 @@ def _forward_sifting(alice: socket.socket, bob: socket.socket, reporter: Reporte
     reporter.info("Forwarding matching indices to Bob...")
     matching = json.loads(forward_message(alice, bob))
     reporter.info(f"Matching indices forwarded ({len(matching)} entries)")
+
+    if decoy:
+        # Step 2d: Alice's intensity reveal, then Bob's per-intensity gains/QBERs.
+        reporter.info("Forwarding decoy reveal (intensity labels, then gains)...")
+        forward_message(alice, bob)
+        forward_message(bob, alice)
 
     reporter.info("Forwarding sample indices to Bob...")
     forward_message(alice, bob)
@@ -127,9 +136,9 @@ def run_eavesdrop(
     only the QBER threshold; a later finite-key or key confirmation abort shows up
     as the peers closing the connection while she forwards the rest.
     """
-    signed = _forward_hellos(alice, bob, reporter)
+    signed, decoy = _forward_hellos(alice, bob, reporter)
     eve_bases = _intercept_qubits(alice, bob, reporter, fraction)
-    bob_bases, matching = _forward_sifting(alice, bob, reporter)
+    bob_bases, matching = _forward_sifting(alice, bob, reporter, decoy)
     known = _report_knowledge(eve_bases, bob_bases, matching, reporter)
 
     reporter.section("Phase 3: Waiting for Protocol Outcome")

@@ -55,18 +55,29 @@ def _quantum_random_bits(n: int) -> list[int]:
     return [int(b) for b in memory]
 
 
-def generate_random_bits(n: int) -> list[int]:
-    """Alice's raw key bits."""
+def generate_random_bits(n: int, rng: "np.random.Generator | None" = None) -> list[int]:
+    """
+    Alice's raw key bits.
+
+    With no ``rng`` the bits come from the Aer QRNG (one shot per bit), unchanged. Passing a
+    NumPy generator draws them directly in NumPy instead: the analytic measurement backend uses
+    this so that a 1e6-1e7-pulse run does not submit millions of shots to the simulator.
+    """
+    if rng is not None:
+        return rng.integers(0, 2, size=n, dtype=np.int8).tolist()
     return _quantum_random_bits(n)
 
 
-def generate_random_bases(n: int) -> list[str]:
+def generate_random_bases(n: int, rng: "np.random.Generator | None" = None) -> list[str]:
     """
-    Generate n truly random measurement bases using a QRNG.
+    Generate n truly random measurement bases using a QRNG (or ``rng`` in NumPy, see
+    generate_random_bits).
 
     '+' = Rectilinear (Z-basis): eigenstates |0⟩, |1⟩
     'x' = Diagonal (X-basis):    eigenstates |+⟩, |−⟩
     """
+    if rng is not None:
+        return ["x" if b else "+" for b in rng.integers(0, 2, size=n, dtype=np.int8).tolist()]
     bits = _quantum_random_bits(n)
     return ["+" if b == 0 else "x" for b in bits]
 

@@ -68,6 +68,7 @@ class HandshakeState:
     kem_ss: Optional[bytes] = None  # hybrid only
     elapsed_s: float = 0.0  # wall time of the hello and finished exchanges
     overhead_bytes: int = 0  # framed bytes of hello and finished messages, sent + received
+    preloss: bool = False  # peer announced an eve-mode pre-loss handoff (Bob reports detections)
 
     @property
     def signed(self) -> bool:
@@ -95,16 +96,22 @@ def alice_hello(
     auth: AuthContext | None,
     reporter: Reporter,
     params: ProtocolParams = ProtocolParams(),
+    preloss: bool = False,
 ) -> HandshakeState:
-    """Steps 0a/0b for Alice. Returns only once Bob's identity passed the trust check."""
-    state = HandshakeState(_checked_local_mode(auth))
+    """
+    Steps 0a/0b for Alice. Returns only once Bob's identity passed the trust check.
+
+    `preloss` announces an eve-mode pre-loss handoff in the hello (a non-policy flag), so Bob
+    reports his detected pulse indices in step 2 and Alice sifts against his ground truth.
+    """
+    state = HandshakeState(_checked_local_mode(auth), preloss=preloss)
     policy = params.security_policy()
     with _cost(channel, state):
         kem_pk = kem_seed = None
         if state.mode == "hybrid":
             kem_pk, kem_seed = pqc.kem_keygen()
         reporter.info(f"Sending hello (mode: {state.mode})...")
-        channel.send_json(_hello(state.mode, policy, auth, kem_pk=kem_pk))
+        channel.send_json(_hello(state.mode, policy, auth, preloss=preloss, kem_pk=kem_pk))
         try:
             msg = channel.recv_json()
         except ConnectionError:
@@ -153,6 +160,7 @@ def bob_hello(
             channel.send_json({"hello": {"v": PROTOCOL_VERSION, "mode": state.mode, "params": policy}})
             raise PeerAuthError(mismatch)
 
+        state.preloss = fields.get("preloss") == 1 and not isinstance(fields.get("preloss"), bool)
         alice_kem_pk = None
         if state.signed:
             state.peer_id_pk = _id_pk(fields)
@@ -245,8 +253,11 @@ def session_key(qkd_key: bytes, state: HandshakeState, transcript_hash: bytes) -
     return derive_session_key(qkd_key, state.kem_ss, transcript_hash, state.mode)
 
 
-def _hello(mode: str, policy: dict, auth: AuthContext | None, **extra: Optional[bytes]) -> dict:
+def _hello(mode: str, policy: dict, auth: AuthContext | None, preloss: bool = False,
+           **extra: Optional[bytes]) -> dict:
     fields: dict[str, Any] = {"v": PROTOCOL_VERSION, "mode": mode, "params": policy}
+    if preloss:
+        fields["preloss"] = 1  # non-policy flag: eve-mode pre-loss handoff (see alice_hello)
     if mode != "none":
         fields["id_pk"] = _b64(auth.public_key)
         fields["nonce"] = _b64(os.urandom(NONCE_BYTES))

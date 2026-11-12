@@ -126,7 +126,7 @@ def test_pulse_message_round_trip_and_ideal_form() -> None:
         {"n": 2, "index": [1, 0], "qubits": ["a", "b"]},  # not increasing
         {"n": 2, "index": [0, 2], "qubits": ["a", "b"]},  # out of range
         {"n": 2, "index": [0], "qubits": ["a", "b"]},  # lengths differ
-        {"n": 2, "index": None, "qubits": ["a", 3]},
+        {"n": 2, "index": None, "qubits": ["a", 1.5]},  # neither a string, a code 0-3, nor null
         {"n": 1, "index": None, "qubits": ["a", "b"]},  # more qubits than pulses
     ],
     ids=["v2_list", "negative_n", "missing_pulse", "unsorted", "out_of_range", "length_mismatch",

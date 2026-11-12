@@ -43,6 +43,16 @@ WIRE_STEPS: list[tuple[str, str]] = [
 BINARY_STEPS = {"5-meta"}
 
 
+# The same order with a decoy source: the decoy reveal (step 2d) sits between sifting
+# (step 2) and QBER estimation (step 3). Both messages are tracked (JSON).
+WIRE_STEPS_DECOY: list[tuple[str, str]] = [
+    *WIRE_STEPS[:5],             # 0a, 0b, 1, 2-bases, 2-matching
+    ("2d-reveal", A2B),          # Alice's intensity labels + decoy/vacuum bits
+    ("2d-gains", B2A),           # Bob's per-intensity gains and QBERs
+    *WIRE_STEPS[5:],             # 3-sample_indices ... 5-meta
+]
+
+
 # The same steps when both sides run with resume on (sign/hybrid): the sealed request and grant
 # sit between the finished exchange and the metadata.
 WIRE_STEPS_RESUME: list[tuple[str, str]] = [

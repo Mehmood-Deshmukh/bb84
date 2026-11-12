@@ -26,7 +26,7 @@ from qkd.core.bb84_protocol import (
 )
 from qkd.core.config import ProtocolParams
 from qkd.core.channel_model import ChannelParams, decode_pulses, misalignment_flips
-from qkd.core.quantum_channel import measure_qubits
+from qkd.core.quantum_channel import measure_qubits_backend
 from qkd.services.file_stream import receive_encrypted_file, receive_file_meta, received_path
 from qkd.services.reporting import Reporter
 from qkd.services.resume import ResumeError, chunk_boundary, receive_encrypted_file_resumable, validate_meta
@@ -35,10 +35,13 @@ from qkd.usecases.common import (
     AuthContext,
     KeyExchangeResult,
     TransferInterrupted,
+    decoy_asymptotic_verdict,
+    decoy_finite_key_verdict,
     finite_key_verdict,
     report_qber_verdict,
     report_summary,
 )
+from qkd.usecases.decoy_reveal import bob_decoy_reveal
 from qkd.usecases.handshake import bob_finished, bob_hello, session_key
 from qkd.usecases.reconcile import bob_reconcile
 from qkd.usecases.resume import BobNegotiation, ResumeOptions, bob_negotiate, bob_send_receipt, wants_resume
@@ -53,45 +56,53 @@ class ReceiveResult:
 
 
 def _measure(
-    channel: TranscriptChannel, link: ChannelParams, reporter: Reporter
-) -> tuple[int, list[int], list[str]]:
+    channel: TranscriptChannel, link: ChannelParams, reporter: Reporter, measurement: str = "aer"
+) -> tuple[int, list[int], list[str], list[int]]:
     """
     Step 1 for Bob: receive the pulses that clicked, measure them, return
-    (pulses sent, bits, bases) with one bit and basis per clicked pulse.
+    (pulses sent, bits, bases, detected index) with one bit and basis per clicked pulse and
+    the global pulse number of each click.
 
     Bob's detector is emulated here: photons are measured in a random basis and the
     result is flipped with the misalignment probability; a click from background alone
-    (a null qubit) gives a uniformly random bit.
+    (a null qubit) gives a uniformly random bit. ``measurement`` picks the backend: "aer"
+    runs Qiskit per qubit; "analytic" computes the outcomes in NumPy (see quantum_channel).
     """
     reporter.info("Receiving qubits from quantum channel...")
-    n, _index, qubits = decode_pulses(channel.recv_untracked())
+    n, index, qubits = decode_pulses(channel.recv_untracked())
     m = len(qubits)
     photons = [i for i, q in enumerate(qubits) if q is not None]
     reporter.success(f"{m} of {n} pulses clicked ({len(photons)} photons, {m - len(photons)} background)")
     reporter.metrics(raw_qubits=n, detected=m)
 
+    rng = np.random.default_rng()
+    qrng = rng if measurement == "analytic" else None
     reporter.info("Generating random measurement bases...")
     t_sim = time.perf_counter()
-    bases = generate_random_bases(m)
+    bases = generate_random_bases(m, qrng)
 
     reporter.info("Measuring qubits (collapsing quantum states)...")
     t0 = time.perf_counter()
-    measured = measure_qubits([qubits[i] for i in photons], [bases[i] for i in photons])
-    flips = misalignment_flips(len(photons), link, np.random.default_rng())
-    bits = generate_random_bits(m)  # background clicks keep these random bits
+    measured = measure_qubits_backend([qubits[i] for i in photons], [bases[i] for i in photons],
+                                      measurement, rng)
+    flips = misalignment_flips(len(photons), link, rng)
+    bits = generate_random_bits(m, qrng)  # background clicks keep these random bits
     for i, bit, flip in zip(photons, measured, flips):
         bits[i] = bit ^ int(flip)
     reporter.success(f"Measured {len(photons)} qubits in {time.perf_counter() - t0:.2f}s")
     # Time spent in the simulator (QRNG and measurement), kept apart from protocol cost
     reporter.metrics(sim_ms=round((time.perf_counter() - t_sim) * 1000, 3))
-    return n, bits, bases
+    return n, bits, bases, index
 
 
-def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str], reporter: Reporter) -> list[int]:
+def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str],
+          index: list[int], reporter: Reporter, preloss: bool) -> tuple[list[int], list[int]]:
     reporter.stage("sifting")
     reporter.section("Phase 2: Classical Channel (Basis Exchange)")
     reporter.info("Sending measurement bases to Alice...")
-    channel.send_json(bases)
+    # With an eve-mode pre-loss handoff Bob's detections are the ground truth (a PNS Eve changed
+    # which pulses reached him), so he reports the global indices alongside his bases.
+    channel.send_json({"bases": bases, "detected": index} if preloss else bases)
 
     reporter.info("Receiving matching indices from Alice...")
     matching = channel.recv_json()
@@ -101,7 +112,7 @@ def _sift(channel: TranscriptChannel, raw: int, bits: list[int], bases: list[str
     reporter.success(f"Sifted key: {len(sifted)} bits (from {len(bits)} detected of {raw} pulses)")
     reporter.info(f"Sift rate: {len(sifted) / max(1, len(bits)) * 100:.1f}% of detected pulses")
     reporter.metrics(sifted_length=len(sifted))
-    return sifted
+    return sifted, matching
 
 
 def _answer_qber_sample(channel: TranscriptChannel, sifted: list[int], reporter: Reporter) -> tuple[float, list[int]]:
@@ -116,15 +127,29 @@ def _answer_qber_sample(channel: TranscriptChannel, sifted: list[int], reporter:
     return channel.recv_json()["qber"], sample_indices
 
 
-def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter) -> KeyExchangeResult:
-    """Bob's side of BB84 up to and including privacy amplification (steps 1 to 4)."""
+def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporter: Reporter,
+                     preloss: bool = False) -> KeyExchangeResult:
+    """
+    Bob's side of BB84 up to and including privacy amplification (steps 1 to 4).
+
+    `preloss` (announced in Alice's hello) makes Bob report his detected pulse indices in step 2,
+    so Alice sifts against his ground truth under an eve-mode pre-loss handoff.
+    """
     reporter.stage("quantum_transmission")
     reporter.section("Phase 1: Quantum Key Distribution (BB84)")
-    raw, bits, bases = _measure(channel, params.channel, reporter)
-    sifted = _sift(channel, raw, bits, bases, reporter)
-    qber, sample_indices = _answer_qber_sample(channel, sifted, reporter)
+    raw, bits, bases, index = _measure(channel, params.channel, reporter, params.measurement)
+    sifted, matching = _sift(channel, raw, bits, bases, index, reporter, preloss)
 
-    result = dict(raw_qubits=raw, sifted_length=len(sifted), sample_size=len(sample_indices),
+    # With a decoy source, read the intensity labels (step 2d) and keep only the signal
+    # intensity for the key; decoy and vacuum bits are revealed and used only for estimation.
+    est = None
+    if params.decoy_enabled:
+        key_bits, est = bob_decoy_reveal(channel, bits, matching, params, reporter)
+    else:
+        key_bits = sifted
+    qber, sample_indices = _answer_qber_sample(channel, key_bits, reporter)
+
+    result = dict(raw_qubits=raw, sifted_length=len(key_bits), sample_size=len(sample_indices),
                   qber=qber, threshold=params.qber_threshold)
     if report_qber_verdict(qber, params.qber_threshold, len(sample_indices), reporter):
         reason = f"QBER {qber:.2%} >= threshold {params.qber_threshold:.0%}"
@@ -132,14 +157,19 @@ def run_key_exchange(channel: TranscriptChannel, params: ProtocolParams, reporte
 
     # Without reconciliation the kept bits must already match Alice's; any difference
     # is caught by key confirmation (4b) or the file tag. With "cascade" Bob corrects them.
-    kept = discard_indices(sifted, sample_indices)
+    kept = discard_indices(key_bits, sample_indices)
     # Count distinct positions, so a repeated index cannot inflate the sample size
     sample_size = len(set(sample_indices))
     leaked = 0
     if params.reconciliation == "cascade":
         rec = bob_reconcile(channel, kept, qber, sample_size, reporter)
         kept, leaked = rec.bits, rec.leaked_bits
-    secure, reason = finite_key_verdict(len(kept), sample_size, qber, params, reporter, leaked)
+    if params.decoy_enabled and params.decoy_gate == "composable":
+        secure, reason = decoy_finite_key_verdict(est, qber, params, reporter)
+    elif params.decoy_enabled:
+        secure, reason = decoy_asymptotic_verdict(len(kept), est, params, reporter, leaked)
+    else:
+        secure, reason = finite_key_verdict(len(kept), sample_size, qber, params, reporter, leaked)
     if reason is not None:
         return KeyExchangeResult(key=None, secure_bits=secure, abort_reason=reason, **result)
 
@@ -182,7 +212,7 @@ def receive_file(
     reporter.section("Phase 0: Authentication (Hello Exchange)")
     handshake = bob_hello(channel, auth, reporter, params)
 
-    kx = run_key_exchange(channel, params, reporter)
+    kx = run_key_exchange(channel, params, reporter, preloss=handshake.preloss)
     if kx.aborted:
         return ReceiveResult(kx)
 
