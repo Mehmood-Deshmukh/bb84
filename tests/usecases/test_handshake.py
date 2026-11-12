@@ -302,8 +302,9 @@ def test_signature_covers_the_confirmation_tag(keys, parallel) -> None:
 @pytest.mark.parametrize(
     "bob_params",
     [ProtocolParams(eps_sec=1e-6), ProtocolParams(final_key_bits=128), ProtocolParams(enforce_finite_key=False),
-     ProtocolParams(qber_threshold=0.2)],
-    ids=["eps_sec", "final_key_bits", "enforce_finite_key", "qber_threshold"],
+     ProtocolParams(qber_threshold=0.2), ProtocolParams(source="decoy"),
+     ProtocolParams(intensities=(0.5, 0.1, 0.0)), ProtocolParams(probs=(0.6, 0.3, 0.1))],
+    ids=["eps_sec", "final_key_bits", "enforce_finite_key", "qber_threshold", "source", "intensities", "probs"],
 )
 @pytest.mark.parametrize("mode", ["none", "hybrid"])
 def test_parameter_mismatch_aborts_both_sides(mode: str, bob_params: ProtocolParams, keys, parallel) -> None:

@@ -1,0 +1,21 @@
+# D2: honest decoy-state transfer on GYS at several distances. Hybrid auth, Cascade
+# reconciliation, weak coherent source with (signal, decoy, vacuum) = (0.48, 0.1, 0.0) and
+# sending probabilities (0.7, 0.2, 0.1) (the defaults). target_detected scales QKD_NUM_QUBITS
+# per distance (by the single-photon click probability) so every run has enough signal clicks
+# to clear the decoy_asymptotic gate; 30000 keeps a comfortable margin at all three distances.
+# Each run records the per-intensity measured gains/QBERs next to the channel model's
+# (decoy_gain_* vs model_gain_*, decoy_qber_decoy), the Y1 lower bound vs the true single-photon
+# yield (decoy_Y1_lower vs model_Y1), the asymptotic secure length (secure_key_bits), and the
+# runtime. SOURCE and RECONCILIATION are passed to the runners as QKD_* environment variables.
+name: d2_decoy_honest
+description: Honest decoy-state transfer on GYS at 0/25/50 km; per-intensity statistics, Y1 bound, secure length
+repeats: 10
+fixed:
+  mode: hybrid
+  payload_bytes: 10000
+  QKD_SOURCE: decoy
+  QKD_RECONCILIATION: cascade
+  QKD_CHANNEL_PRESET: GYS
+  target_detected: 30000
+grid:
+  QKD_CHANNEL_LENGTH_KM: [0, 25, 50]

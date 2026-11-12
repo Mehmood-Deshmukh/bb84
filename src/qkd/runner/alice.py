@@ -126,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         with sock:
-            result = send_file(sock, args.file, reporter, auth=auth, resume=resume_options(args))
+            result = send_file(sock, args.file, reporter, auth=auth, resume=resume_options(args),
+                               eve_mode=args.eve_mode)
     except KeyConfirmationError as exc:
         reporter.error(f"Key confirmation FAILED: {exc.reason}")
         reporter.result(OUTCOME_ABORTED_QBER, exc.reason)

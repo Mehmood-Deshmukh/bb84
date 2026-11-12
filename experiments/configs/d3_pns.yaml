@@ -1,0 +1,32 @@
+# D3: photon-number-splitting (PNS) attack vs the weak-coherent baseline and decoy states.
+#
+# Four cells at each GYS distance: {wcp, decoy} x {honest, PNS}. The PNS cells put a
+# photon-number-splitting Eve in the path (scripts' qkd-eve --attack pns; Alice runs in
+# --eve-mode and hands over her pre-loss pulses). Eve forwards multi-photon pulses and tunes
+# the rate to the honest gain, so the single-photon (Tomamichel) gate used by wcp sees nothing
+# wrong and the run COMPLETES, while the decoy gate sees the signal/decoy gains pulled apart,
+# drives Y1_L to 0, and ABORTS. The honest cells (no Eve) are the controls.
+#
+# Each run records: whether it completed or aborted and which gate stopped it (stopped_at,
+# alice_outcome/alice_error), Bob's QBER (qber vs model_qber), the per-intensity measured gains
+# next to the channel model (decoy_gain_* vs model_gain_*, decoy only), the single-photon yield
+# bound vs the true yield (decoy_Y1_lower vs model_Y1), and the secure length (secure_key_bits).
+# target_detected scales QKD_NUM_QUBITS per distance. Eve's share of the key (the wcp leak) is
+# quantified directly by tests/invariants/test_pns.py; the benchmark harness captures only the
+# Alice/Bob JSON events, and the PNS cells overshoot target_detected because Eve's line is lossless.
+#
+# N is around 2**21 at 25 km (Phase 2), reached here via target_detected.
+name: d3_pns
+description: PNS attack vs wcp baseline and decoy states on GYS; gate reached, QBER, gains, Y1_L
+repeats: 10
+fixed:
+  mode: hybrid
+  payload_bytes: 10000
+  QKD_RECONCILIATION: cascade
+  QKD_CHANNEL_PRESET: GYS
+  target_detected: 30000
+# The 2 x 2 product of source and attack is exactly the four cells {wcp, decoy} x {honest, PNS}.
+grid:
+  QKD_CHANNEL_LENGTH_KM: [0, 25, 50]
+  QKD_SOURCE: ["wcp", "decoy"]
+  eve_attack: ["none", "pns"]

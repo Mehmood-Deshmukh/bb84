@@ -1,0 +1,13 @@
+op,median_us,iters
+sig_keygen,167.27,2000
+sign,845.8825,2000
+verify,166.711,2000
+kem_keygen,97.289,2000
+kem_encaps,34.99,2000
+kem_decaps,99.594,2000
+confirmation_tag_hmac,10.895,2000
+derive_session_key_hybrid,5.238,2000
+key_schedule_subkeys,9.009,2000
+secure_key_length,2.444,2000
+toeplitz_pa_8192,6490.001,200
+transcript_update,4.819,2000
