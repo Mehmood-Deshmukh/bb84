@@ -16,6 +16,8 @@ Resumable transfers add one non-terminal status, `interrupted`. It is kept apart
                         |
                         +--> cancelled, failed
     pending -> interrupted (a resume offer that the peer did not take)
+    completed -> pending (receiver only: the sender never got the receipt and resumes; the new
+                          session sends no file data, only the receipt again)
 
 `can_move` and `path_to` know both tables.
 """
@@ -45,6 +47,7 @@ RESUME_TRANSITIONS: dict[TransferStatus, frozenset[TransferStatus]] = {
     S.transferring: frozenset({S.interrupted}),
     S.interrupted: frozenset({S.pending, S.cancelled, S.failed}),
     S.pending: frozenset({S.interrupted}),
+    S.completed: frozenset({S.pending}),  # only taken by NodeService._register_resume_offer
 }
 
 # Forward path used when protocol events skip intermediate statuses

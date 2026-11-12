@@ -123,8 +123,9 @@ def final_file(out: Path) -> Path:
 
 
 def state_files(out: Path) -> list[str]:
+    """The partial state (.part, sidecar). The delivery record of a finished transfer is not partial state."""
     d = out / ".resume"
-    return sorted(os.listdir(d)) if d.exists() else []
+    return sorted(f for f in os.listdir(d) if not f.endswith(".done.json")) if d.exists() else []
 
 
 def flip(name: str):
@@ -463,3 +464,174 @@ def test_mallory_relaying_the_hellos_is_still_caught_at_key_confirmation(keys, p
     assert isinstance(alice, PeerAuthError) and "signature" in alice.reason
     assert alice_rep.stages[-1] == "key_confirmation", "Alice never reached the resume negotiation or any file data"
     assert not mitm.relayed and not out.exists()
+
+
+# ── the resume flag is signed ───────────────────────────────────
+
+
+def _strip_flag(msg: dict) -> dict:
+    return {k: v for k, v in msg.items() if k != "resume"}
+
+
+def _add_flag(msg: dict) -> dict:
+    return {**msg, "resume": 1}
+
+
+@pytest.mark.parametrize("step", ["4b-bob", "4b-alice"])
+def test_stripping_the_resume_flag_fails_the_finished_signature(step: str, keys, parallel, src: Path, out: Path) -> None:
+    interrupt_after(keys, parallel, src, out, 6)
+    run = transfer(keys, parallel, src, out, tamper_step=step, tamper=_strip_flag)
+    victim = run.alice if step == "4b-bob" else run.bob
+    assert isinstance(victim, PeerAuthError), victim
+    assert isinstance(run.alice, Exception) and isinstance(run.bob, Exception), "no side may report success"
+    assert not final_file(out).exists()
+    assert ResumeStore(str(out), TID).load().next_chunk == 6, "the interrupted state must survive"
+
+
+@pytest.mark.parametrize("step, alice_on, bob_on", [("4b-bob", True, False), ("4b-alice", False, True)])
+def test_adding_the_resume_flag_fails_the_finished_signature(step: str, alice_on: bool, bob_on: bool,
+                                                             keys, parallel, src: Path, out: Path) -> None:
+    run = transfer(keys, parallel, src, out, alice_resume=OPTS if alice_on else None,
+                   bob_resume=OPTS if bob_on else None, chunks=None, tamper_step=step, tamper=_add_flag)
+    victim = run.alice if step == "4b-bob" else run.bob
+    assert isinstance(victim, PeerAuthError), victim
+    assert not final_file(out).exists()
+
+
+def test_the_plain_finished_signature_is_unchanged_without_the_flag() -> None:
+    from qkd.usecases.handshake import FINISHED_PREFIX, RESUME_SUFFIX, finished_message
+
+    t, tag = b"\x01" * 32, b"\x02" * 32
+    assert finished_message(b"bob", t, tag) == FINISHED_PREFIX + b"bob|" + t + tag
+    assert finished_message(b"bob", t, tag, True) == finished_message(b"bob", t, tag) + RESUME_SUFFIX
+
+
+# ── a peer that goes silent without closing the connection ──────
+
+
+def _stalling_run(keys, parallel, src: Path, out: Path, relay_chunks: int, forward_receipt: bool = False) -> Run:
+    """Like transfer(), but after relay_chunks chunks the proxy stops forwarding and keeps both connections open."""
+    import threading
+
+    from qkd.services import wire
+
+    opts = ResumeOptions(TID, stall_timeout=0.5)
+    done = threading.Event()
+    alice_rep, bob_rep = Reporter(), Reporter()
+    alice_end, proxy_a = socket.socketpair()
+    proxy_b, bob_end = socket.socketpair()
+
+    def silent_proxy() -> None:
+        try:
+            for _, direction in WIRE_STEPS_RESUME:
+                src_sock, dst_sock = (proxy_a, proxy_b) if direction == "A2B" else (proxy_b, proxy_a)
+                wire.forward_message(src_sock, dst_sock)
+            for _ in range(relay_chunks):
+                wire.forward_message(proxy_a, proxy_b)
+            if forward_receipt:
+                wire.forward_message(proxy_b, proxy_a)
+        except (ConnectionError, OSError):
+            pass
+        done.wait(20)  # hold both connections open and silent: no FIN, no RST
+
+    def side(fn):
+        def run():
+            try:
+                return fn()
+            except Exception as exc:  # noqa: BLE001 - asserted on by the caller
+                return exc
+        return run
+
+    def both() -> tuple[Any, Any]:
+        try:
+            a, b = parallel(
+                side(lambda: send_file(alice_end, str(src), alice_rep, PARAMS, context(keys, "alice", "hybrid"), opts)),
+                side(lambda: receive_file(bob_end, str(out), bob_rep, PARAMS, context(keys, "bob", "hybrid"), opts)),
+            )
+            return a, b
+        finally:
+            done.set()
+
+    with alice_end, proxy_a, proxy_b, bob_end:
+        (alice, bob), _ = parallel(both, silent_proxy)
+    assert alice is not None and bob is not None, "a side hung: the stall timeout did not fire"
+    return Run(alice, bob, alice_rep, bob_rep)
+
+
+def test_a_silent_network_mid_stream_interrupts_both_sides_and_can_be_resumed(keys, parallel, src: Path, out: Path) -> None:
+    run = _stalling_run(keys, parallel, src, out, relay_chunks=5)
+    assert isinstance(run.bob, TransferInterrupted), run.bob
+    assert isinstance(run.alice, TransferInterrupted), run.alice
+    assert run.bob.bytes_verified == 5 * CHUNK
+    assert not final_file(out).exists()
+    assert ResumeStore(str(out), TID).load().next_chunk == 5
+
+    run = transfer(keys, parallel, src, out, chunks=CHUNKS - 5)
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert final_file(out).read_bytes() == src.read_bytes()
+
+
+def test_a_swallowed_receipt_interrupts_the_sender_instead_of_hanging(keys, parallel, src: Path, out: Path) -> None:
+    run = _stalling_run(keys, parallel, src, out, relay_chunks=CHUNKS)
+    assert not isinstance(run.bob, Exception), run.bob
+    assert final_file(out).read_bytes() == src.read_bytes()
+    assert isinstance(run.alice, TransferInterrupted), run.alice
+    assert "silent" in run.alice.reason
+
+
+def test_the_stall_timeout_does_not_disturb_an_honest_transfer(keys, parallel, src: Path, out: Path) -> None:
+    run = _stalling_run(keys, parallel, src, out, relay_chunks=CHUNKS, forward_receipt=True)
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert final_file(out).read_bytes() == src.read_bytes()
+
+
+# ── the receiver finished but the sender never got the receipt ──
+
+
+def _delivered_without_receipt(keys, parallel, src: Path, out: Path) -> None:
+    run = _stalling_run(keys, parallel, src, out, relay_chunks=CHUNKS)
+    assert not isinstance(run.bob, Exception) and isinstance(run.alice, TransferInterrupted), (run.alice, run.bob)
+    assert final_file(out).read_bytes() == src.read_bytes() and state_files(out) == []
+    assert (out / ".resume" / f"{TID}.done.json").exists()
+
+
+def test_a_resume_after_a_lost_receipt_sends_only_the_receipt(keys, parallel, src: Path, out: Path) -> None:
+    _delivered_without_receipt(keys, parallel, src, out)
+    before = final_file(out).stat().st_mtime_ns
+
+    run = transfer(keys, parallel, src, out, chunks=0)  # the proxy relays no chunk at all, then the receipt
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert run.alice_rep.merged()["resumed_from_bytes"] == SIZE == run.bob_rep.merged()["resumed_from_bytes"]
+    assert final_file(out).read_bytes() == src.read_bytes()
+    assert final_file(out).stat().st_mtime_ns == before, "the delivered file was not rewritten"
+
+
+def test_a_delivered_file_that_is_gone_is_sent_again(keys, parallel, src: Path, out: Path) -> None:
+    _delivered_without_receipt(keys, parallel, src, out)
+    final_file(out).unlink()
+
+    run = transfer(keys, parallel, src, out, chunks=CHUNKS)
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert final_file(out).read_bytes() == src.read_bytes()
+
+
+def test_a_changed_source_after_delivery_is_sent_from_the_start(keys, parallel, src: Path, out: Path) -> None:
+    _delivered_without_receipt(keys, parallel, src, out)
+    src.write_bytes(os.urandom(SIZE))  # same name and size, other bytes
+
+    run = transfer(keys, parallel, src, out, chunks=CHUNKS)
+    assert not isinstance(run.alice, Exception) and not isinstance(run.bob, Exception), (run.alice, run.bob)
+    assert run.alice_rep.merged()["resume_restart_reason"] == "source_changed"
+    assert final_file(out).read_bytes() == src.read_bytes()
+
+
+def test_a_different_sender_gets_no_receipt_for_a_delivered_file(keys, parallel, src: Path, out: Path) -> None:
+    _delivered_without_receipt(keys, parallel, src, out)
+    stranger = pqc.sig_keygen()
+    bob_ctx = AuthContext("hybrid", *keys["bob"], AcceptAnyVerifier())
+    alice_ctx = AuthContext("hybrid", stranger[0], stranger[1], context(keys, "alice", "hybrid").verifier)
+
+    run = transfer(keys, parallel, src, out, alice_ctx=alice_ctx, bob_ctx=bob_ctx, chunks=0)
+    assert isinstance(run.bob, PeerAuthError) and "identity differs" in run.bob.reason
+    assert isinstance(run.alice, Exception), "the stranger must not be told the file was delivered"
+    assert (out / ".resume" / f"{TID}.done.json").exists()

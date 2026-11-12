@@ -74,6 +74,10 @@ class EventBus:
         for queue in self._subscribers[transfer_id]:
             queue.put_nowait(_CLOSED)
 
+    def reopen(self, transfer_id: str) -> None:
+        """Undo close(): a finished transfer runs again (a resume after a lost receipt)."""
+        self._closed.discard(transfer_id)
+
     def history(self, transfer_id: str, after: int = 0) -> list[TransferEvent]:
         return [e for e in self._log.get(transfer_id, []) if e.seq > after]
 

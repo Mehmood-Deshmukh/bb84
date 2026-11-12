@@ -385,7 +385,7 @@ def test_metadata_instead_of_a_grant_is_not_taken_for_one(keys, tmp_path: Path, 
 
     _, bob = run_pair(keys, alice, bob_side(out))
     assert isinstance(bob, ResumeError) and bob.resumable
-    assert ResumeStore(str(out), TID).load().next_chunk == 4, "the interrupted state must survive a stripped flag"
+    assert ResumeStore(str(out), TID).load().next_chunk == 4, "the interrupted state must survive a sender that does not negotiate"
 
 
 def test_silent_receiver_times_out_on_alice(keys, src: Path) -> None:
@@ -457,3 +457,18 @@ def test_a_receipt_from_another_session_is_rejected(keys) -> None:
 
     alice, _ = run_pair(keys, lambda s: alice_await_receipt(s.ch, s.key, s.T, DIGEST, 1234), bob_replay, salt="22" * 16)
     assert isinstance(alice, PeerAuthError)
+
+
+def test_raw_bytes_instead_of_a_grant_keep_the_state(keys, tmp_path: Path, src: Path) -> None:
+    from qkd.services.wire import send_bytes
+
+    out = tmp_path / "out"
+    interrupted(out, src, 4, pqc.fingerprint(keys["alice"][0]))
+
+    def alice(s: Session):
+        s.ch.recv_untracked()
+        send_bytes(s.ch.sock, os.urandom(200))  # what encrypted metadata looks like: not JSON
+
+    _, bob = run_pair(keys, alice, bob_side(out))
+    assert isinstance(bob, ResumeError) and bob.resumable, bob
+    assert ResumeStore(str(out), TID).load().next_chunk == 4

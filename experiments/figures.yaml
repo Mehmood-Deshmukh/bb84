@@ -173,3 +173,29 @@ figures:
     xlabel: Pulses detected at Bob
     ylabel: Runs stopped by the QBER check
     title: Detection on a GYS 25 km link (95% Wilson band)
+
+  - id: e8_reconnect
+    kind: measure
+    source: e8_reconnect
+    where: {strategy: resume}
+    x: QKD_NUM_QUBITS
+    y: reconnect_s
+    series: mode
+    series_order: [sign, hybrid]
+    xscale: log2
+    xlabel: Raw qubits N
+    ylabel: Re-connection overhead (s)
+    title: Time from reconnect to the first file chunk (resume)
+
+  - id: e8_completion
+    kind: measure
+    source: e8_reconnect
+    x: QKD_NUM_QUBITS
+    y: completion_s
+    series: [mode, strategy]
+    series_order: [sign / resume, sign / restart, hybrid / resume, hybrid / restart]
+    xscale: log2
+    xlabel: Raw qubits N
+    ylabel: Time to finish after reconnect (s)
+    title: Time to finish after an interruption at 50%
+    legend_loc: upper left

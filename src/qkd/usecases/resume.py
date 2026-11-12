@@ -14,10 +14,10 @@ and bound to the transcript digest T, so they can neither be read, altered, nor 
 another session. A message that fails authentication is a PeerAuthError: the transfer aborts
 before any file data moves.
 
-The two sides enter 4c/4d only if each offered resume in its `finished` message. That flag is
-not signed, so a network attacker can strip it (the sides then fall back to a plain transfer,
-or Bob, who had asked, stops with his interrupted state untouched) or stall the exchange until
-the negotiation timeout; neither reveals data or reuses a key.
+The two sides enter 4c/4d only if each offered resume in its `finished` message. The flag is
+covered by the finished signature, so a network attacker who strips or adds it fails step 4b
+(PeerAuthError) and cannot make one side negotiate while the other does not. An attacker can
+still stall the exchange until the negotiation timeout; that reveals no data and reuses no key.
 
 Bob asks to continue after the chunks he holds (`next_chunk`), with a hash of those bytes.
 Alice decides the offset: `next_chunk` if her file still starts with those bytes, else 0 and a
@@ -40,12 +40,13 @@ from typing import Any, Iterator, Optional
 from cryptography.exceptions import InvalidTag
 
 from qkd.core import pqc
-from qkd.core.config import RESUME_SYNC_CHUNKS
+from qkd.core.config import RESUME_STALL_TIMEOUT, RESUME_SYNC_CHUNKS
 from qkd.core.crypto_utils import open_resume_message, seal_resume_message
 from qkd.services.file_stream import file_sha256
 from qkd.services.reporting import Reporter
 from qkd.services.resume import (
     TRANSFER_ID,
+    DeliveredRecord,
     ResumeError,
     ResumeState,
     ResumeStore,
@@ -72,6 +73,7 @@ class ResumeOptions:
     transfer_id: str
     sync_chunks: int = RESUME_SYNC_CHUNKS
     timeout: float = NEGOTIATION_TIMEOUT
+    stall_timeout: float = RESUME_STALL_TIMEOUT  # longest silence in the file phase before `interrupted`
 
     def __post_init__(self) -> None:
         if not TRANSFER_ID.match(self.transfer_id or ""):
@@ -84,6 +86,7 @@ class BobNegotiation:
     previous: Optional[ResumeState]  # what Bob had on disk before this session
     offset: int  # first chunk index Alice will send
     reason: Optional[str]  # set when Alice restarted from 0 although Bob asked for more
+    delivered: Optional[DeliveredRecord] = None  # set when Bob already has the whole file in place
 
 
 def wants_resume(resume: Optional[ResumeOptions], auth: Optional[AuthContext], reporter: Reporter) -> bool:
@@ -114,8 +117,17 @@ def bob_negotiate(
     reporter.info("Negotiating resume...")
     store = ResumeStore(output_dir, resume.transfer_id)
     previous = store.load()
+    delivered = store.load_delivered() if previous is None else None
     next_chunk, prefix = 0, None
-    if previous is not None:
+    if delivered is not None:
+        # The file is complete and in place; the sender most likely never got the receipt.
+        if delivered.peer_fingerprint != handshake.peer_fingerprint:
+            raise PeerAuthError(
+                "resume refused: the authenticated peer's identity differs from the one that sent this transfer"
+            )
+        next_chunk, prefix = delivered.num_chunks, delivered.sha256
+        reporter.info(f"This transfer was already delivered ({delivered.total_size} bytes): asking only to confirm it")
+    elif previous is not None:
         if previous.peer_fingerprint != handshake.peer_fingerprint:
             raise PeerAuthError(
                 "resume refused: the authenticated peer's identity differs from the one that started this transfer"
@@ -124,12 +136,13 @@ def bob_negotiate(
         prefix = store.prefix_sha256(previous.next_byte)
         reporter.info(f"Holding {previous.next_byte} verified bytes ({next_chunk} chunks) of an interrupted transfer")
 
+    known = delivered or previous
     request = {
         "v": REQUEST_VERSION,
         "transfer_id": resume.transfer_id,
         "next_chunk": next_chunk,
-        "chunk_size": previous.chunk_size if previous else None,
-        "meta_digest": previous.meta_digest if previous else None,
+        "chunk_size": known.chunk_size if known else None,
+        "meta_digest": known.meta_digest if known else None,
         "prefix_sha256": prefix,
         "alice_fp": handshake.peer_fingerprint,
     }
@@ -150,7 +163,8 @@ def bob_negotiate(
         reporter.metrics(resume_restart_reason=reason or "restarted")
     elif offset > 0:
         reporter.success(f"Resuming at chunk {offset}")
-    return BobNegotiation(store, previous, offset, reason if offset == 0 and next_chunk > 0 else None)
+    return BobNegotiation(store, previous, offset, reason if offset == 0 and next_chunk > 0 else None,
+                          delivered if offset > 0 else None)
 
 
 def alice_negotiate(
@@ -215,7 +229,8 @@ def bob_send_receipt(channel: TranscriptChannel, key: bytes, transcript_hash: by
 
 def alice_await_receipt(channel: TranscriptChannel, key: bytes, transcript_hash: bytes, sha256: str, size: int) -> None:
     """
-    Step 6 for Alice: wait for Bob's receipt. ConnectionError (Bob never confirmed) propagates;
+    Step 6 for Alice: wait for Bob's receipt. ConnectionError and TimeoutError (Bob never confirmed;
+    the caller set the stall timeout on the socket) propagate;
     PeerAuthError if the receipt fails authentication; ResumeError if it names another file.
     """
     msg = channel.recv_untracked()
@@ -240,6 +255,8 @@ def _recv(channel: TranscriptChannel, missing: str) -> Any:
         return channel.recv_untracked()
     except TimeoutError:
         raise ResumeError(f"timed out: {missing}", resumable=True) from None
+    except ValueError:  # not JSON (for example raw metadata bytes): the peer is not negotiating
+        raise ResumeError(f"{missing} (got something else)", resumable=True) from None
 
 
 def _decode_blob(msg: Any, name: str, what: str) -> bytes:

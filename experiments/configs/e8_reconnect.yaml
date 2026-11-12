@@ -1,0 +1,35 @@
+# E8: re-connection overhead after an interruption, as a function of raw qubits N.
+# A resume is a NEW session (hello, full BB84 at N qubits, key confirmation, then for resume the
+# sealed negotiation 4c/4d, then only the missing chunks, then the receipt). No key is reused, so the
+# BB84 cost is paid again on every reconnect and grows with N. strategy=resume continues from Bob's
+# verified chunks; strategy=restart sends the whole file again (session 1 is identical up to the kill).
+#
+# Run: Alice is SIGKILLed once kill_fraction of the chunks are sent and Bob must report `interrupted`;
+# then the second session is measured. Resume needs sign or hybrid, so there is no none mode.
+# Definitions (all for the second session; times from the runners' event timestamps, as elsewhere):
+#   reconnect_s            Alice's authentication stage to her file_transfer stage, i.e. hello + BB84 +
+#                          key confirmation + (resume only) negotiation 4c/4d. The negotiation runs inside
+#                          key_confirmation and has no stage of its own, so it is not separated here;
+#                          compare alice_key_confirmation_s of resume vs restart for its cost
+#   reconnect_minus_sim_s  reconnect_s minus sim_s (the simulator's share, Alice + Bob)
+#   completion_s           Alice's authentication stage to her result: Bob's receipt (resume) or the end of
+#                          streaming (restart, which has no receipt)
+#   resumed_from_bytes, bytes_total   existing metrics (restart: 0 and the payload size)
+#   resent_bytes           file_wire_bytes of the session: metadata + chunks on the wire, prefixes included
+#   lost_bytes             bytes Alice had sent when killed (her last progress event) minus the bytes Bob's
+#                          sidecar holds; includes chunks still in flight, which Bob may or may not verify
+#   reconnect_bytes        channel_bytes: everything through the transcript channel before the first chunk
+#                          (qubit stream + BB84 classical + hello/finished + 4c/4d)
+# QKD_ENFORCE_FINITE_KEY=0 lets N below 8192 complete: the key is then NOT provably secure, which is fine
+# for a timing experiment. Ideal channel, no reconciliation, no Eve, no latency proxy.
+name: e8_reconnect
+description: Re-connection overhead and time to finish after an interruption, resume vs restart, by raw qubits
+repeats: 24
+fixed:
+  payload_bytes: 8388608   # 8 MiB = 128 chunks at the default 64 KiB
+  kill_fraction: 0.5
+  QKD_ENFORCE_FINITE_KEY: 0
+grid:
+  QKD_NUM_QUBITS: [1024, 2048, 4096, 8192, 16384]
+  mode: [sign, hybrid]
+  strategy: [resume, restart]

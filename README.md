@@ -139,6 +139,11 @@ interruption she sends it from the start and says why (`source_changed`, `file_c
 When the last chunk is verified Bob checks the size and the SHA-256 of the whole file, renames the file into
 place, and sends Alice a sealed receipt. Alice only reports success after reading it. See the wire table below.
 
+If the receipt is lost (the connection drops after Bob finished), Alice ends `interrupted` while Bob has the
+file. Bob keeps a small delivery record, `received/.resume/<id>.done.json`. When Alice resumes, a new session
+runs, Bob says he holds every chunk, Alice checks that her file still matches and sends no file data, and Bob
+sends the receipt again. If the received file was deleted or the source changed, the file is sent again.
+
 **What is stored where.**
 
 | Where | What |
@@ -164,8 +169,8 @@ The final file `received_<name>` appears only by an atomic rename after the whol
 
 **Limits.**
 
-- Each side says it supports resume with an unsigned `"resume": 1` in its `finished` message. A network
-  attacker can strip it (the transfer then runs without resume, or Bob stops with his data intact) or stall the
+- Each side says it supports resume with `"resume": 1` in its `finished` message. The flag is covered by the
+  finished signature, so stripping or adding it in transit fails step 4b. A network attacker can still stall the
   negotiation until its 30 second timeout. That is the same power as dropping the connection.
 - Only transfers that got past key confirmation can be resumed; before that nothing was verified.
 - The sender hashes the whole file once before sending, and the receiver once after receiving.
@@ -236,7 +241,7 @@ evaluated separately by QBER, and `finished` contains the signature over `T` its
 | 5+ | A to B | No | one message per chunk: GCM tag (16 bytes) + ciphertext. With resume, chunks `resume_offset` to the end |
 | 6 | B to A | No | `{"resume_done": b64}` (resume only): sealed receipt, sent after the size and whole-file SHA-256 verified |
 
-With resume on, each `finished` also carries `"resume": 1` (not covered by the signature). Steps 4c, 4d and 6
+With resume on, each `finished` also carries `"resume": 1` (covered by the signature: the signed bytes then end in `|resume`). Steps 4c, 4d and 6
 happen only if both sides sent it; otherwise the transfer runs exactly as without resume.
 
 Bob sends `finished` first at step 4b. Alice verifies Bob's signature before deriving the session key or sending
@@ -295,8 +300,8 @@ What it does not stop (limits):
   certificate hierarchy, or revocation infrastructure.
 - **Noiseless simulation and no reconciliation**: The quantum channel simulation is noiseless, so any non-zero
   QBER aborts the transfer; real-world information reconciliation is not implemented.
-- **Resume negotiation can be stalled or disabled** by an in-path attacker who strips the unsigned `resume` flag
-  (see [Resumable transfers](#resumable-transfers)). It cannot cause key or nonce reuse or reveal data.
+- **Resume negotiation can be stalled** by an in-path attacker until its timeout; stripping the signed `resume`
+  flag aborts the session at key confirmation (see [Resumable transfers](#resumable-transfers)). It cannot cause key or nonce reuse or reveal data.
 - **Unauthenticated REST API**: The `qkd-node` REST API and mDNS discovery are unauthenticated and run over plain HTTP.
 
 ## REST API
@@ -389,6 +394,7 @@ once at import, and the node passes its environment on to the alice and bob proc
 | `QKD_KNOWN_PEERS_FILE` | known_peers.json | path to pinned peer public keys |
 | `QKD_TOFU` | 1 | trust-on-first-use for unknown peers (1 = enabled, 0 = disabled) |
 | `QKD_RESUME` | 0 | make transfers resumable: the node passes `--resume` to its runners, `qkd-alice`/`qkd-bob` default to it. Needs `sign` or `hybrid` |
+| `QKD_RESUME_STALL_TIMEOUT` | 60 | seconds of silence a resumable transfer accepts in the file phase (metadata, chunks, receipt) before it reports `interrupted`; this is what notices a network that drops without closing the connection. Raise it for very large files, since each side hashes the whole file once inside this window |
 | `QKD_RESUME_SYNC_CHUNKS` | 8 | verified chunks between an fsync of the `.part` and a sidecar update; a hard kill re-sends at most this many minus one |
 | `QKD_STATE_FILE` | node_state.json | where the node keeps interrupted transfers (and, beside it, the sender's uploads) |
 

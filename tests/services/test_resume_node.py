@@ -590,3 +590,48 @@ def test_a_sender_finds_a_restarted_receiver_by_its_fingerprint(tmp_path: Path) 
         assert body["peer"]["id"] == "peer-b-after-restart" and body["peer"]["port"] == 8555
         (_, host, port, _), = peers.called("offer_transfer")
         assert (host, port) == ("10.0.0.7", 8555)
+
+
+# ── the receiver completed, the sender never got the receipt ────
+
+
+def completed_receiver(root: Path, with_record: bool):
+    """A receiver node whose transfer t1 completed; optionally with the runner's delivery record on disk."""
+    from qkd.services.file_stream import describe_file
+
+    launcher = FakeLauncher(bob=lambda args: FakeProcess(runner_events("completed", listening=40001)))
+    service = make_node(root, launcher, RecordingPeerClient(), B_ID, peer=PeerInfo("node-a", "alice-laptop", "10.0.0.1", 8000))
+    if with_record:
+        os.makedirs(service.output_dir, exist_ok=True)
+        source = root / "a.bin"
+        source.write_bytes(os.urandom(SIZE))
+        (Path(service.output_dir) / "received_a.bin").write_bytes(source.read_bytes())
+        ResumeStore(service.output_dir, "t1").save_delivered(describe_file(str(source), 100, with_sha256=True), FP)
+    return service, launcher
+
+
+def receive_and_complete(c: TestClient) -> None:
+    assert c.post("/api/v1/transfers/incoming", json={"id": "t1", "filename": "a.bin", "file_size": SIZE, "sender": SENDER}).status_code == 201
+    assert c.patch("/api/v1/transfers/t1", json={"status": "accepted"}).status_code == 202
+    assert wait_for(c, "t1", "completed")["status"] == "completed"
+
+
+def test_a_resume_offer_for_a_delivered_transfer_runs_it_again_for_the_receipt(tmp_path: Path) -> None:
+    service, launcher = completed_receiver(tmp_path, with_record=True)
+    with TestClient(create_app(service)) as c:
+        receive_and_complete(c)
+        assert ResumeStore(service.output_dir, "t1").load_delivered() is not None, "completing keeps the delivery record"
+        resp = offer(c)
+        assert resp.status_code == 201 and resp.json()["status"] == "pending" and resp.json()["attempt"] == 2
+        assert len(c.get("/api/v1/transfers").json()["items"]) == 1
+        assert c.patch("/api/v1/transfers/t1", json={"status": "accepted"}).status_code == 202
+        assert wait_for(c, "t1", "completed")["status"] == "completed"
+        assert launcher.roles() == ["bob", "bob"]
+
+
+def test_a_resume_offer_for_a_completed_transfer_without_a_record_conflicts(tmp_path: Path) -> None:
+    service, _ = completed_receiver(tmp_path, with_record=False)
+    with TestClient(create_app(service)) as c:
+        receive_and_complete(c)
+        assert error_code(offer(c), 409) == "transfer_exists"
+        assert c.get("/api/v1/transfers/t1").json()["status"] == "completed"

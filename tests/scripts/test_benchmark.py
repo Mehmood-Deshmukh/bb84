@@ -198,3 +198,85 @@ def test_a_run_whose_tree_changed_is_not_paper_grade() -> None:
     meta = {"status": "complete", "git_dirty": False, "repeats": 30, "config": {"repeats": 30}}
     assert bench.paper_grade(meta)
     assert not bench.paper_grade({**meta, "tree_changed_during_run": True})
+
+
+# ── E8: interrupted runs ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("chunks,fraction,expected", [(128, 0.5, 64), (127, 0.5, 64), (1, 0.5, 1), (10, 0.0, 1), (10, 1.5, 10)])
+def test_kill_chunk(chunks: int, fraction: float, expected: int) -> None:
+    assert bench.kill_chunk(chunks, fraction) == expected
+
+
+def test_strategy_is_a_special_parameter_with_defaults() -> None:
+    _, points = bench.grid_points({"grid": {"strategy": ["resume", "restart"]}, "fixed": {"kill_fraction": 0.25}})
+    assert [p["strategy"] for p in points] == ["resume", "restart"]
+    assert {p["kill_fraction"] for p in points} == {0.25}
+    assert bench.DEFAULTS["strategy"] is None and "strategy" in bench.SPECIAL and "kill_fraction" in bench.SPECIAL
+
+
+def test_kept_bytes_reads_the_sidecar(tmp_path) -> None:
+    side = tmp_path / "t.json"
+    side.write_text('{"next_chunk": 3, "chunk_size": 1000, "total_size": 2500}')
+    assert bench.kept_bytes(side) == 2500  # the last chunk is short
+    assert bench.kept_bytes(tmp_path / "missing.json") is None
+    side.write_text("not json")
+    assert bench.kept_bytes(side) is None
+
+
+def test_last_progress_bytes_and_stage_ts() -> None:
+    events = [ev("progress", 1.0, chunks_done=1, num_chunks=4, bytes_done=100, total_bytes=400),
+              ev("stage", 1.5, "file_transfer"),
+              ev("progress", 2.0, chunks_done=2, num_chunks=4, bytes_done=200, total_bytes=400)]
+    assert bench.last_progress_bytes(events) == 200 and bench.last_progress_bytes([]) is None
+    assert bench.stage_ts(events, "file_transfer") == 1.5 and bench.stage_ts(events, "sifting") is None
+
+
+def test_reconnect_columns_for_a_resumed_session() -> None:
+    alice = [ev("stage", 10.0, "authentication"), ev("stage", 14.0, "key_confirmation"),
+             ev("stage", 15.0, "file_transfer"), ev("result", 17.5, "done", outcome="completed", error=None)]
+    a = bench.summarize_events(alice)
+    a["metrics"].update(resumed_from_bytes=4096, bytes_total=8192, file_wire_bytes=4200, channel_bytes=900)
+    cols = bench.reconnect_columns(alice, a, 1.5, payload_size=8192, sent_before_kill=5000, kept=4096, s1_bob_outcome="interrupted")
+    assert cols["reconnect_s"] == pytest.approx(5.0) and cols["reconnect_minus_sim_s"] == pytest.approx(3.5)
+    assert cols["completion_s"] == pytest.approx(7.5)
+    assert (cols["resumed_from_bytes"], cols["bytes_total"], cols["resent_bytes"], cols["reconnect_bytes"]) == (4096, 8192, 4200, 900)
+    assert cols["lost_bytes"] == 904 and cols["s1_bob_outcome"] == "interrupted"
+    assert set(cols) == set(bench.RECONNECT_COLUMNS)
+
+
+def test_reconnect_columns_for_a_restart_and_missing_data() -> None:
+    a = bench.summarize_events([ev("stage", 1.0, "authentication"), ev("result", 2.0, "done", outcome="completed", error=None)])
+    cols = bench.reconnect_columns([], a, None, payload_size=1000, sent_before_kill=None, kept=None, s1_bob_outcome="completed")
+    assert cols["resumed_from_bytes"] == 0 and cols["bytes_total"] == 1000  # restart sends it all
+    assert cols["reconnect_s"] is None and cols["reconnect_minus_sim_s"] is None and cols["lost_bytes"] is None
+    assert set(cols) == set(bench.RECONNECT_COLUMNS)  # every row has the same columns (RowLog)
+
+
+def test_lost_bytes_is_never_negative() -> None:
+    a = bench.summarize_events([ev("stage", 1.0, "authentication"), ev("result", 2.0, "done", outcome="completed", error=None)])
+    cols = bench.reconnect_columns([], a, None, payload_size=10, sent_before_kill=100, kept=300, s1_bob_outcome="interrupted")
+    assert cols["lost_bytes"] == 0
+
+
+def test_reconnect_columns_are_summarized() -> None:
+    for col in bench.RECONNECT_COLUMNS:
+        assert col == "s1_bob_outcome" or col in bench.NUMERIC_SUMMARY
+
+
+def test_strategy_runs_reject_none_mode_eve_and_proxy(tmp_path) -> None:
+    base = {**bench.DEFAULTS, "strategy": "resume", "mode": "sign"}
+    for bad in ({"mode": "none"}, {"eve_fraction": 0.3}, {"rtt_ms": 10}, {"strategy": "bogus"}):
+        with pytest.raises(ValueError):
+            bench.run_interrupted({**base, **bad}, tmp_path / "p", "x", tmp_path, {}, {})
+
+
+def test_figure_rows_are_filtered_and_series_folded() -> None:
+    pytest.importorskip("matplotlib")
+    plot = _load("plot_figures")
+    rows = [{"mode": "sign", "strategy": "resume"}, {"mode": "sign", "strategy": "restart"}]
+    fig = {"where": {"strategy": "resume"}, "series": "mode"}
+    assert plot.prepare_rows(fig, [dict(r) for r in rows]) == [rows[0]]
+    fig = {"series": ["mode", "strategy"]}
+    out = plot.prepare_rows(fig, [dict(r) for r in rows])
+    assert fig["series"] == "__series" and [r["__series"] for r in out] == ["sign / resume", "sign / restart"]
