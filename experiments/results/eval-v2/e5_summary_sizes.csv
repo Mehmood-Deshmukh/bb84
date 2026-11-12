@@ -1,0 +1,5 @@
+payload_bytes,runs,wall_median,wall_iqr,alice_outcome,bob_outcome,bob_authentication_median,bob_quantum_transmission_median,bob_sifting_median,bob_qber_estimation_median,bob_privacy_amplification_median,bob_key_confirmation_median,bob_file_transfer_median
+1024,5,3.1148,0.0325,completed,completed,0.0129,2.6002,0.0031,0.0012,0.0133,0.0035,0.0008
+1048576,5,3.1365,0.0258,completed,completed,0.0127,2.6218,0.003,0.0013,0.0134,0.004,0.0022
+10485760,5,3.1277,0.0052,completed,completed,0.0126,2.6092,0.0031,0.0016,0.0138,0.003,0.0217
+104857600,5,3.2034,0.013,completed,completed,0.0126,2.5954,0.003,0.0012,0.0137,0.0027,0.1465

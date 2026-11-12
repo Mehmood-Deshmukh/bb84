@@ -19,6 +19,9 @@ known_peers.json
 experiments/results/
 experiments/figures/
 
+# Paper source kept local, not part of the code repo (edited by the authors)
+elsarticle.tex
+
 # Local notes and plans (e.g. experiments/ignore-INSIGHTS.md)
 **/ignore-*
 

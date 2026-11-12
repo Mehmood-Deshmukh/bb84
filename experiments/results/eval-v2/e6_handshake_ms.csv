@@ -1,0 +1,4 @@
+mode,auth_overhead_bytes,inproc_warm_ms_median,inproc_warm_ms_iqr,cli_alice_ms_median,cli_alice_ms_iqr,cli_bob_ms_median,cli_bob_ms_iqr,cli_runs_alice,cli_runs_bob
+none,378,0.373,0.146,0.4,0.048,0.192,0.014,10,10
+sign,14708,1.784,0.782,11.958,1.996,14.18,0.941,10,10
+hybrid,17772,2.53,0.708,14.616,2.258,16.28,1.031,10,10

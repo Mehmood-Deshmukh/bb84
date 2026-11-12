@@ -1,0 +1,5 @@
+exp,preset,length_km,attack,n_pulses,required_N,n_over_required,runs,key_produced,key_rate,key_rate_wilson_lo,key_rate_wilson_hi,ell_median,comp_Y1_lower_median,asym_Y1_lower_median,gain_signal_median,gain_decoy_median,qber_median,eve_known_fraction_median,stopped_at_mode,wall_s_median
+d5_decoy_pns,GYS,0.0,pns,28253983,28253983,1.0,10,0,0.0,0.0,0.2775,0.0,0.0,0.0,0.022059,0.005757,0.033038,1.0,decoy_gate,16.498
+d5_decoy_pns,GYS,25.0,pns,60804717,60804717,1.0,10,0,0.0,0.0,0.2775,0.0,0.0,0.0,0.007929,0.001709,0.032308,1.0,decoy_gate,21.597
+d5_decoy_pns,KTH,0.0,pns,9326437,9326437,1.0,10,0,0.0,0.0,0.2775,0.0,0.0,0.0,0.091072,0.015676,0.009909,1.0,decoy_gate,12.782
+d5_decoy_pns,KTH,25.0,pns,22472938,22472938,1.0,10,0,0.0,0.0,0.2775,0.0,0.0,0.0,0.02949,0.005913,0.010028,1.0,decoy_gate,15.45
