@@ -12,8 +12,8 @@ finite-key gate on unless a sub-experiment states otherwise.
 CLI timings below have **Nagle disabled** — the ~40 ms delayed-ACK stall that the previous
 run (commit 3c2f5f9) measured is gone (see "Changes vs previous run").
 
-Companion files: `implementation.md` (1A facts, from 3c2f5f9 — wire sizes there are the v2
-protocol; see E6 here for the v3 values), `claims-check.md` (1B static check).
+Companion file: `implementation.md` (1A facts, from 3c2f5f9 — wire sizes there are the v2
+protocol; see E6 here for the v3 values).
 
 ## Environment
 

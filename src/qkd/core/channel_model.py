@@ -1,8 +1,7 @@
 """
 Lossy, noisy channel and threshold detector for BB84 with a single-photon source.
 
-Model (Ma, Qi, Zhao, Lo, Phys. Rev. A 72, 012326, 2005, Eq. 5 to 9; see
-literature/2005_Ma-Qi-Zhao-Lo_practical-decoy-state_PRA72-012326.pdf):
+Model (Ma, Qi, Zhao, Lo, Phys. Rev. A 72, 012326, 2005, Eq. 5 to 9):
 
     t_AB = 10^(-alpha * L / 10)          fibre transmittance, alpha in dB/km
     eta  = t_AB * eta_Bob                overall transmission and detection efficiency

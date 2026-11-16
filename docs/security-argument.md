@@ -61,9 +61,9 @@ Assumptions throughout:
 
 - Private signing and KEM seeds never leave the node (they live in the node's
   `AuthContext`; `src/qkd/usecases/common.py`).
-- First contact is either pinned out of band or accepted under trust-on-first-use
-  (`QKD_TOFU`, `src/qkd/core/config.py`). A man-in-the-middle present at the very
-  first contact under TOFU is out of scope (see §11).
+- The peer's identity key is pinned out of band (`--peer-fingerprint` or
+  `QKD_KNOWN_PEERS_FILE`). Trust-on-first-use (`QKD_TOFU`) is a convenience that does
+  not meet this assumption (see §11).
 - ML-DSA-65 (FIPS 204) and ML-KEM-768 (FIPS 203), both NIST security category 3, are
   secure: signatures are unforgeable and the KEM is IND-CCA2. These are provided by
   `cryptography`'s `mldsa`/`mlkem` (`src/qkd/core/pqc.py`); if the installed
@@ -429,9 +429,12 @@ classical channel; QBER still stops interference with the quantum channel.
 - **Denial of service is out of scope.** An in-path attacker can always cut the
   connection; the goal here is to prevent a *silent* compromise, not to guarantee
   delivery.
-- **TOFU first contact.** With trust-on-first-use, a man-in-the-middle present at the
-  very first contact can have their key pinned. Out-of-band pinning avoids this; TOFU
-  only protects contacts after the first.
+- **TOFU does not stop an active man in the middle.** The trust store is keyed by
+  fingerprint, so under `QKD_TOFU=1` an unknown key is accepted as a *new* peer, even
+  when the real peer is already known (`test_changed_key_tofu_on_is_new_peer`). Only
+  an explicit pin (`--peer-fingerprint`, or `QKD_KNOWN_PEERS_FILE` with `QKD_TOFU=0`)
+  makes Alice reject Mallory's key. The node pins with the fingerprint from the mDNS
+  TXT record, which is itself unauthenticated.
 - **Qubits share the TCP connection, and the simulated qubit is a classical
   description.** The "quantum" channel is a stream of QASM circuits over the same TCP
   socket (a simulation artefact). Anyone who reads that stream sees the gates and
@@ -452,11 +455,11 @@ classical channel; QBER still stops interference with the quantum channel.
   alone does not prove a quantum-channel attack.
 - **Identities travel in the clear.** `id_pk` is sent unencrypted in both hellos, so a
   passive observer learns which identities talk to each other.
-- **Noiseless channel, no reconciliation.** The simulated channel has no noise, so
-  there is no information reconciliation step; any disagreement in the kept bits is
-  caught by key confirmation (§5a) and the run aborts. On a noisy channel every run
-  would abort until reconciliation is added (and its leakage charged in the finite-key
-  bound).
+- **Reconciliation is off by default.** The default channel is ideal and
+  `QKD_RECONCILIATION=none`, so any disagreement in the kept bits is caught by key
+  confirmation (§5a) and the run aborts. For a noisy channel (`QKD_CHANNEL_PRESET`),
+  turn on `QKD_RECONCILIATION=cascade`; the parities Cascade reveals are charged in the
+  finite-key bound.
 - **Trust is pinned per peer; there is no PKI.** Keys are pinned or accepted under
   TOFU per peer, with no certificate authority or revocation.
 - **Error surfaced to the rejecting peer's partner.** When one side rejects the other
@@ -502,9 +505,9 @@ simulator.
 
 ## 13. Overhead
 
-*Placeholder for Person B's benchmark numbers.* To be filled in with measured
-`handshake_ms`, `auth_overhead_bytes`, and total transfer time for `none`, `sign`, and
-`hybrid` at 128 qubits and a 1 MB payload. **No numbers are invented here.**
+Measured handshake time, authentication bytes and transfer time per mode are in
+[experiments/results/eval-v2/REPORT.md](../experiments/results/eval-v2/REPORT.md)
+(experiments E4 to E6).
 
 What can be stated from the code are the per-message sizes that drive the overhead
 (`src/qkd/core/pqc.py`, `src/qkd/usecases/handshake.py`):
@@ -526,4 +529,4 @@ authentication overhead.
 Binary fields travel base64-encoded inside JSON, so on-wire sizes are about 4/3 of the
 raw sizes plus JSON framing. `auth_overhead_bytes` (reported by the handshake,
 `_report_cost`) counts the actual framed bytes of the hello and finished messages, sent
-plus received, and is the figure Person B's benchmark should report.
+plus received, and is the figure the benchmarks report.

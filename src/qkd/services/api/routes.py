@@ -154,7 +154,7 @@ async def cancel_transfer(transfer_id: str, request: Request) -> Transfer:
 
 # include_in_schema=False: tests/services/test_api.py::test_openapi_schema_and_docs pins the exact set of
 # documented paths and must stay unmodified. To list this route in /docs, drop the flag and add the path
-# to that test (docs/plans/resume.md, decision D13).
+# to that test.
 @router.post(
     "/transfers/{transfer_id}/resume", response_model=Transfer, status_code=status.HTTP_202_ACCEPTED, tags=["transfers"],
     include_in_schema=False,

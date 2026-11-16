@@ -1,6 +1,6 @@
 """
 Composable finite-key decoy-state bounds (Lim, Curty, Walenta, Xu, Zbinden,
-Phys. Rev. A 89, 022307, 2014; literature/2014_Lim-Curty-Walenta-Xu-Zbinden_concise-decoy-bounds_PRA89-022307.pdf).
+Phys. Rev. A 89, 022307, 2014).
 
 Phase 5a: numbers only. Nothing here touches the protocol, the wire, Eve, or the simulator,
 and the module imports no qiskit. It builds on ``decoy.py`` (Ma et al. asymptotic numerics)

@@ -1,6 +1,6 @@
 """
 Cascade information reconciliation (Brassard and Salvail, EUROCRYPT 1993), the original
-parameters as analysed by Martinez-Mateo et al., QIC 2015 (see literature/):
+parameters as analysed by Martinez-Mateo et al., QIC 2015:
 
 - 4 passes; block size k1 = ceil(0.73 / Q) in pass 1, doubled each pass (capped at n).
 - Pass 1 uses the key as is; later passes use a shuffled order, the same on both sides.

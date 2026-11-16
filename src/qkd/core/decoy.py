@@ -1,6 +1,6 @@
 """
 Decoy-state numerics for weak-coherent-pulse BB84 (Ma, Qi, Zhao, Lo, Phys. Rev. A 72,
-012326, 2005; literature/2005_Ma-Qi-Zhao-Lo_practical-decoy-state_PRA72-012326.pdf).
+012326, 2005).
 
 This is Phase 1: numbers only. Nothing here touches the protocol, the wire, Eve, or the
 simulator, and the module imports no qiskit. It reuses ``ChannelParams`` from
